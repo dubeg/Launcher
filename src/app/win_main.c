@@ -13,6 +13,7 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,6 +89,7 @@ static s32 app_find_icon_entry(AppState *app, const wchar_t *path, s32 icon_inde
 static s32 app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 icon_index);
 static void app_icon_queue_push(AppState *app, s32 entry_index);
 static void app_request_item_icon(AppState *app, const LaunchItem *item);
+static bool app_resample_rgba_bilinear_premul(const u8 *src, s32 src_w, s32 src_h, u8 *dst, s32 dst_w, s32 dst_h);
 static bool app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride);
 static void app_process_icon_queue(AppState *app, s32 budget);
 static void app_shutdown_icon_cache(AppState *app);
@@ -601,6 +603,107 @@ app_icon_queue_push(AppState *app, s32 entry_index)
 }
 
 static bool
+app_resample_rgba_bilinear_premul(const u8 *src, s32 src_w, s32 src_h, u8 *dst, s32 dst_w, s32 dst_h)
+{
+    if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
+        return false;
+    }
+
+    /* Area resampling in premultiplied alpha gives better quality than
+       point/bilinear when shrinking icons aggressively. */
+    f32 scale_x = (f32)src_w / (f32)dst_w;
+    f32 scale_y = (f32)src_h / (f32)dst_h;
+    for (s32 y = 0; y < dst_h; ++y) {
+        f32 y0f = (f32)y * scale_y;
+        f32 y1f = (f32)(y + 1) * scale_y;
+        s32 sy0 = (s32)floorf(y0f);
+        s32 sy1 = (s32)ceilf(y1f);
+        if (sy0 < 0) {
+            sy0 = 0;
+        }
+        if (sy1 > src_h) {
+            sy1 = src_h;
+        }
+        for (s32 x = 0; x < dst_w; ++x) {
+            f32 x0f = (f32)x * scale_x;
+            f32 x1f = (f32)(x + 1) * scale_x;
+            s32 sx0 = (s32)floorf(x0f);
+            s32 sx1 = (s32)ceilf(x1f);
+            if (sx0 < 0) {
+                sx0 = 0;
+            }
+            if (sx1 > src_w) {
+                sx1 = src_w;
+            }
+
+            f32 acc_a = 0.0f;
+            f32 acc_rp = 0.0f;
+            f32 acc_gp = 0.0f;
+            f32 acc_bp = 0.0f;
+            f32 total_w = 0.0f;
+
+            for (s32 sy = sy0; sy < sy1; ++sy) {
+                f32 py0 = (f32)sy;
+                f32 py1 = (f32)(sy + 1);
+                f32 wy0 = y0f > py0 ? y0f : py0;
+                f32 wy1 = y1f < py1 ? y1f : py1;
+                f32 wy = wy1 - wy0;
+                if (wy <= 0.0f) {
+                    continue;
+                }
+                for (s32 sx = sx0; sx < sx1; ++sx) {
+                    f32 px0 = (f32)sx;
+                    f32 px1 = (f32)(sx + 1);
+                    f32 wx0 = x0f > px0 ? x0f : px0;
+                    f32 wx1 = x1f < px1 ? x1f : px1;
+                    f32 wx = wx1 - wx0;
+                    if (wx <= 0.0f) {
+                        continue;
+                    }
+
+                    f32 w = wx * wy;
+                    const u8 *p = src + ((size_t)sy * (size_t)src_w + (size_t)sx) * 4u;
+                    f32 a = (f32)p[3] / 255.0f;
+                    acc_a += a * w;
+                    acc_rp += ((f32)p[0] * a) * w;
+                    acc_gp += ((f32)p[1] * a) * w;
+                    acc_bp += ((f32)p[2] * a) * w;
+                    total_w += w;
+                }
+            }
+
+            f32 a = 0.0f;
+            f32 rp = 0.0f;
+            f32 gp = 0.0f;
+            f32 bp = 0.0f;
+            if (total_w > 0.00001f) {
+                a = acc_a / total_w;
+                rp = acc_rp / total_w;
+                gp = acc_gp / total_w;
+                bp = acc_bp / total_w;
+            }
+
+            u8 out_a = (u8)(a * 255.0f + 0.5f);
+            u8 out_r = 0;
+            u8 out_g = 0;
+            u8 out_b = 0;
+            if (a > 0.0001f) {
+                out_r = (u8)(rp / a + 0.5f);
+                out_g = (u8)(gp / a + 0.5f);
+                out_b = (u8)(bp / a + 0.5f);
+            }
+
+            u8 *out = dst + ((size_t)y * (size_t)dst_w + (size_t)x) * 4u;
+            out[0] = out_r;
+            out[1] = out_g;
+            out[2] = out_b;
+            out[3] = out_a;
+        }
+    }
+    return true;
+}
+
+static bool
 app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride)
 {
     if (!path || !path[0] || !out_pixels || !out_stride || icon_size <= 0) {
@@ -624,11 +727,19 @@ app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, 
         return false;
     }
 
+    s32 source_size = icon_size * 3;
+    if (source_size < 48) {
+        source_size = 48;
+    }
+    if (source_size > 128) {
+        source_size = 128;
+    }
+
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(bmi));
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = icon_size;
-    bmi.bmiHeader.biHeight = -icon_size;
+    bmi.bmiHeader.biWidth = source_size;
+    bmi.bmiHeader.biHeight = -source_size;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -648,28 +759,39 @@ app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, 
     }
 
     HGDIOBJ old_obj = SelectObject(hdc, dib);
-    PatBlt(hdc, 0, 0, icon_size, icon_size, BLACKNESS);
-    DrawIconEx(hdc, 0, 0, info.hIcon, icon_size, icon_size, 0, NULL, DI_NORMAL);
+    PatBlt(hdc, 0, 0, source_size, source_size, BLACKNESS);
+    DrawIconEx(hdc, 0, 0, info.hIcon, source_size, source_size, 0, NULL, DI_NORMAL);
 
     s32 stride = icon_size * 4;
     u8 *pixels = (u8 *)heap_alloc_zero((size_t)stride * (size_t)icon_size);
     if (pixels) {
         const u8 *src = (const u8 *)dib_pixels;
-        for (s32 y = 0; y < icon_size; ++y) {
-            for (s32 x = 0; x < icon_size; ++x) {
-                size_t p = (size_t)(y * stride + x * 4);
-                u8 b = src[p + 0];
-                u8 g = src[p + 1];
-                u8 r = src[p + 2];
-                u8 a = src[p + 3];
-                pixels[p + 0] = r;
-                pixels[p + 1] = g;
-                pixels[p + 2] = b;
-                pixels[p + 3] = a;
+        s32 src_stride = source_size * 4;
+        u8 *src_rgba = (u8 *)heap_alloc_zero((size_t)src_stride * (size_t)source_size);
+        if (src_rgba) {
+            for (s32 y = 0; y < source_size; ++y) {
+                for (s32 x = 0; x < source_size; ++x) {
+                    size_t p = (size_t)(y * src_stride + x * 4);
+                    u8 b = src[p + 0];
+                    u8 g = src[p + 1];
+                    u8 r = src[p + 2];
+                    u8 a = src[p + 3];
+                    src_rgba[p + 0] = r;
+                    src_rgba[p + 1] = g;
+                    src_rgba[p + 2] = b;
+                    src_rgba[p + 3] = a;
+                }
             }
+            app_resample_rgba_bilinear_premul(src_rgba, source_size, source_size, pixels, icon_size, icon_size);
+            heap_free(src_rgba);
+        } else {
+            heap_free(pixels);
+            pixels = NULL;
         }
-        *out_pixels = pixels;
-        *out_stride = stride;
+        if (pixels) {
+            *out_pixels = pixels;
+            *out_stride = stride;
+        }
     }
 
     SelectObject(hdc, old_obj);
