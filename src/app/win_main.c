@@ -12,6 +12,7 @@
 
 #include <d3d11.h>
 #include <shellapi.h>
+#include <shellscalingapi.h>
 #include <shlwapi.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -19,8 +20,12 @@
 #include <string.h>
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "Shcore.lib")
 
 #define LAUNCHER_RESULTS_FONT_PX 18.0f
+#define LAUNCHER_UI_FONT_PX 24.0f
+#define LAUNCHER_BASE_WINDOW_W 920
+#define LAUNCHER_BASE_WINDOW_H 560
 #define LAUNCHER_DEFAULT_VISIBLE_ROWS 10
 #define LAUNCHER_MIN_VISIBLE_ROWS 1
 #define LAUNCHER_MAX_VISIBLE_ROWS 50
@@ -73,6 +78,8 @@ typedef struct AppState {
     s32 icon_cache_count;
     IconWorker icon_worker;
     u32 frame_counter;
+    u32 dpi;
+    f32 dpi_scale;
 } AppState;
 
 static AppState *g_app = NULL;
@@ -89,6 +96,10 @@ static s32 app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 
 static void app_request_item_icon(AppState *app, const LaunchItem *item);
 static void app_process_icon_completions(AppState *app, s32 budget);
 static void app_shutdown_icon_cache(AppState *app);
+static u32 app_primary_monitor_dpi(void);
+static bool app_load_text_systems(AppState *app, const wchar_t *font_path);
+static void app_unload_text_systems(AppState *app);
+static void app_invalidate_icon_textures(AppState *app);
 
 static s32
 app_clamp_query_index(AppState *app, s32 index)
@@ -222,8 +233,9 @@ app_center_window(AppState *app)
 {
     RECT work = {0};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    s32 width = 920;
-    s32 height = 560;
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
+    s32 width = (s32)((f32)LAUNCHER_BASE_WINDOW_W * s + 0.5f);
+    s32 height = (s32)((f32)LAUNCHER_BASE_WINDOW_H * s + 0.5f);
     app_window_size_for_rows(app, &width, &height);
     int x = work.left + ((work.right - work.left) - width) / 2;
     int y = work.top + 80;
@@ -307,9 +319,11 @@ app_refresh_results(AppState *app)
 static f32
 app_results_row_step(AppState *app)
 {
-    f32 row_step = app->text_results.line_height * 2.0f + 12.0f;
-    if (row_step < 48.0f) {
-        row_step = 48.0f;
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
+    f32 row_step = app->text_results.line_height * 2.0f + 12.0f * s;
+    f32 min_step = 48.0f * s;
+    if (row_step < min_step) {
+        row_step = min_step;
     }
     return row_step;
 }
@@ -336,11 +350,12 @@ app_result_rows_per_page(AppState *app)
 static void
 app_window_size_for_rows(AppState *app, s32 *out_width, s32 *out_height)
 {
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
     s32 rows = app_effective_visible_rows(app);
     f32 row_step = app_results_row_step(app);
-    f32 list_h = row_step * (f32)rows + 36.0f;
-    *out_width = 920;
-    *out_height = (s32)(list_h + 122.0f + 0.5f);
+    f32 list_h = row_step * (f32)rows + 36.0f * s;
+    *out_width = (s32)((f32)LAUNCHER_BASE_WINDOW_W * s + 0.5f);
+    *out_height = (s32)(list_h + 122.0f * s + 0.5f);
 }
 
 static void
@@ -615,7 +630,10 @@ app_request_item_icon(AppState *app, const LaunchItem *item)
         request.entry_index = idx;
         request.generation = entry->generation;
         request.icon_index = entry->icon_index;
-        request.icon_size = LAUNCHER_ICON_SIZE_PX;
+        request.icon_size = (s32)((f32)LAUNCHER_ICON_SIZE_PX * app->dpi_scale + 0.5f);
+        if (request.icon_size < 8) {
+            request.icon_size = 8;
+        }
         wcsncpy_s(request.path, array_count(request.path), entry->path, _TRUNCATE);
         if (icon_worker_submit(&app->icon_worker, &request)) {
             entry->state = AppIconState_Queued;
@@ -668,6 +686,63 @@ app_shutdown_icon_cache(AppState *app)
         dx11_renderer_destroy_texture(&app->icon_cache[i].texture);
     }
     app->icon_cache_count = 0;
+}
+
+static u32
+app_primary_monitor_dpi(void)
+{
+    POINT pt;
+    pt.x = GetSystemMetrics(SM_CXSCREEN) / 2;
+    pt.y = GetSystemMetrics(SM_CYSCREEN) / 2;
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+    if (!mon) {
+        return (u32)USER_DEFAULT_SCREEN_DPI;
+    }
+    UINT dpix = USER_DEFAULT_SCREEN_DPI;
+    UINT dpiy = USER_DEFAULT_SCREEN_DPI;
+    if (FAILED(GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dpix, &dpiy)) || dpix == 0) {
+        return (u32)USER_DEFAULT_SCREEN_DPI;
+    }
+    return (u32)dpix;
+}
+
+static bool
+app_load_text_systems(AppState *app, const wchar_t *font_path)
+{
+    f32 ui_h = LAUNCHER_UI_FONT_PX * app->dpi_scale;
+    f32 res_h = LAUNCHER_RESULTS_FONT_PX * app->dpi_scale;
+    if (!kb_text_init(&app->text, font_path, ui_h)) {
+        return false;
+    }
+    dx11_renderer_upload_atlas(&app->renderer, &app->text.raster, 0);
+    app->text.raster.atlas_dirty = false;
+    if (!kb_text_init(&app->text_results, font_path, res_h)) {
+        kb_text_shutdown(&app->text);
+        return false;
+    }
+    dx11_renderer_upload_atlas(&app->renderer, &app->text_results.raster, 1);
+    app->text_results.raster.atlas_dirty = false;
+    return true;
+}
+
+static void
+app_unload_text_systems(AppState *app)
+{
+    kb_text_shutdown(&app->text_results);
+    kb_text_shutdown(&app->text);
+}
+
+static void
+app_invalidate_icon_textures(AppState *app)
+{
+    for (s32 i = 0; i < app->icon_cache_count; ++i) {
+        dx11_renderer_destroy_texture(&app->icon_cache[i].texture);
+        app->icon_cache[i].state = AppIconState_Missing;
+        app->icon_cache[i].generation += 1;
+        if (app->icon_cache[i].generation == 0) {
+            app->icon_cache[i].generation = 1;
+        }
+    }
 }
 
 static void
@@ -805,21 +880,22 @@ app_flush_ui_draw_list(AppState *app, UiDrawList *draw_list, u32 win_w, u32 win_
 static void
 app_draw_query_input(AppState *app, UiDrawList *draw_list, const UiTheme *theme, const UiTextInputControl *input)
 {
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
     f32 input_x = input->bounds.x;
-    f32 input_baseline = input->bounds.y + 22.0f;
+    f32 input_baseline = input->bounds.y + 22.0f * s;
     f32 input_top = input->bounds.y;
     f32 input_height = input->bounds.h;
     f32 input_right = input->bounds.x + input->bounds.w;
     f32 visible_width = input_right - input_x;
-    if (visible_width < 8.0f) {
-        visible_width = 8.0f;
+    if (visible_width < 8.0f * s) {
+        visible_width = 8.0f * s;
     }
     f32 content_height = app->text.line_height;
-    if (content_height > input_height - 8.0f) {
-        content_height = input_height - 8.0f;
+    if (content_height > input_height - 8.0f * s) {
+        content_height = input_height - 8.0f * s;
     }
-    if (content_height < 16.0f) {
-        content_height = 16.0f;
+    if (content_height < 16.0f * s) {
+        content_height = 16.0f * s;
     }
     f32 content_top = input_top + (input_height - content_height) * 0.5f;
 
@@ -884,7 +960,7 @@ app_draw_query_input(AppState *app, UiDrawList *draw_list, const UiTheme *theme,
     if (input->caret_visible) {
         f32 caret_draw_x = input_x + caret_x - app->query_scroll_x;
         if (caret_draw_x >= input_x && caret_draw_x <= input_right) {
-            ui_draw_rect(draw_list, ui_rect(caret_draw_x, content_top, 2.0f, content_height), theme->input_caret);
+            ui_draw_rect(draw_list, ui_rect(caret_draw_x, content_top, 2.0f * s, content_height), theme->input_caret);
         }
     }
 }
@@ -909,31 +985,32 @@ app_render(AppState *app)
     ui_drawlist_begin(&draw_list, &app->frame_arena, 8192);
     UiTheme theme = ui_theme_default();
 
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
     const f32 border_thickness = 1.0f;
-    const f32 outer_padding = 5.0f;
-    const f32 header_gap = 5.0f;
-    const f32 footer_gap = 10.0f;
-    const f32 footer_h = 16.0f;
+    const f32 outer_padding = 5.0f * s;
+    const f32 header_gap = 5.0f * s;
+    const f32 footer_gap = 10.0f * s;
+    const f32 footer_h = 16.0f * s;
     const RenderColor border_color = (RenderColor){0.20f, 0.50f, 0.95f, 1.0f};
 
     UiRect window_rect = ui_rect(0.0f, 0.0f, (f32)width, (f32)height);
     UiRect content_rect = ui_inset(window_rect, border_thickness, border_thickness, border_thickness, border_thickness);
-    UiRect top_bar_rect = ui_rect(content_rect.x + outer_padding, content_rect.y + outer_padding, content_rect.w - outer_padding * 2.0f, 56.0f);
-    UiRect footer_rect = ui_rect(content_rect.x + outer_padding + 8.0f,
+    UiRect top_bar_rect = ui_rect(content_rect.x + outer_padding, content_rect.y + outer_padding, content_rect.w - outer_padding * 2.0f, 56.0f * s);
+    UiRect footer_rect = ui_rect(content_rect.x + outer_padding + 8.0f * s,
                                  content_rect.y + content_rect.h - footer_gap - footer_h,
-                                 300.0f, footer_h);
+                                 300.0f * s, footer_h);
     f32 list_top = top_bar_rect.y + top_bar_rect.h + header_gap;
     f32 list_h = footer_rect.y - footer_gap - list_top;
     if (list_h < 0.0f) {
         list_h = 0.0f;
     }
     UiRect list_rect = ui_rect(content_rect.x + outer_padding, list_top, content_rect.w - outer_padding * 2.0f, list_h);
-    UiRect list_content_rect = ui_inset(list_rect, 12.0f, 12.0f, 12.0f, 12.0f);
+    UiRect list_content_rect = ui_inset(list_rect, 12.0f * s, 12.0f * s, 12.0f * s, 12.0f * s);
     const char *mode_label = app->mode == SearchMode_Apps ? "Apps" : "Files";
-    const f32 top_row_h = 34.0f;
-    const f32 top_row_pad_x = 14.0f;
-    const f32 top_row_gap = 8.0f;
-    const f32 mode_pill_pad_x = 14.0f;
+    const f32 top_row_h = 34.0f * s;
+    const f32 top_row_pad_x = 14.0f * s;
+    const f32 top_row_gap = 8.0f * s;
+    const f32 mode_pill_pad_x = 14.0f * s;
     UiHBoxLayout top_row = ui_hbox_begin(ui_rect(top_bar_rect.x + top_row_pad_x,
                                                  top_bar_rect.y + (top_bar_rect.h - top_row_h) * 0.5f,
                                                  top_bar_rect.w - top_row_pad_x * 2.0f,
@@ -946,7 +1023,7 @@ app_render(AppState *app)
     }
     UiRect mode_pill_rect = ui_hbox_next_fixed(&top_row, mode_pill_w);
     UiTextInputControl input_control = {0};
-    input_control.bounds = ui_hbox_next_fill(&top_row, 80.0f);
+    input_control.bounds = ui_hbox_next_fill(&top_row, 80.0f * s);
     input_control.text = app->query;
     input_control.placeholder = "Type to search...";
     input_control.has_text = (app->query_length > 0);
@@ -965,20 +1042,20 @@ app_render(AppState *app)
     app_draw_query_input(app, &draw_list, &theme, &input_control);
     ui_pop_clip(&draw_list);
 
-    f32 row_top = list_content_rect.y + 6.0f;
+    f32 row_top = list_content_rect.y + 6.0f * s;
     f32 row_step = app_results_row_step(app);
     f32 row_height = row_step;
     s32 rows_per_page = app_result_rows_per_page(app);
     s32 start_index = app->results_top_index;
     bool show_scrollbar = ((s32)app->results.count > rows_per_page);
-    f32 scrollbar_track_w = 8.0f;
-    f32 scrollbar_inset = 8.0f;
+    f32 scrollbar_track_w = 8.0f * s;
+    f32 scrollbar_inset = 8.0f * s;
     f32 scrollbar_reserved_w = show_scrollbar ? (scrollbar_track_w + scrollbar_inset * 2.0f) : 0.0f;
     f32 row_x = list_content_rect.x;
     f32 content_right = list_content_rect.x + list_content_rect.w - scrollbar_reserved_w;
-    const f32 icon_size = (f32)LAUNCHER_ICON_SIZE_PX;
-    const f32 icon_gap = 8.0f;
-    f32 item_text_x = row_x + 12.0f + icon_size + icon_gap;
+    const f32 icon_size = (f32)LAUNCHER_ICON_SIZE_PX * s;
+    const f32 icon_gap = 8.0f * s;
+    f32 item_text_x = row_x + 12.0f * s + icon_size + icon_gap;
     f32 list_clip_w = content_right - list_content_rect.x;
     if (list_clip_w < 0.0f) {
         list_clip_w = 0.0f;
@@ -1007,7 +1084,7 @@ app_render(AppState *app)
         app_request_item_icon(app, item);
         const wchar_t *icon_path = item->icon_path ? item->icon_path : item->launch_path;
         s32 icon_entry_idx = app_find_icon_entry(app, icon_path, item->icon_index);
-        f32 icon_x = row_x + 12.0f;
+        f32 icon_x = row_x + 12.0f * s;
         f32 icon_y = row_top + (row_height - icon_size) * 0.5f;
         if (icon_entry_idx >= 0 && app->icon_cache[icon_entry_idx].state == AppIconState_Ready && app->icon_cache[icon_entry_idx].texture.srv) {
             ui_draw_image(&draw_list,
@@ -1017,7 +1094,7 @@ app_render(AppState *app)
         } else {
             ui_draw_rect(&draw_list, ui_rect(icon_x, icon_y, icon_size, icon_size), (RenderColor){0.20f, 0.24f, 0.30f, 0.8f});
         }
-        f32 title_baseline = row_top + app->text_results.pixel_height + 2.0f;
+        f32 title_baseline = row_top + app->text_results.pixel_height + 2.0f * s;
         f32 subtitle_baseline = title_baseline + app->text_results.line_height;
         ui_draw_text_font(&draw_list, item_text_x, title_baseline, item->display_name, theme.fg_primary, &app->text_results);
         if (item->subtitle) {
@@ -1029,8 +1106,8 @@ app_render(AppState *app)
 
     if (app->results.count == 0) {
         ui_draw_text_font(&draw_list,
-                          list_content_rect.x + 5.0f,
-                          list_content_rect.y + 5.0f + app->text_results.pixel_height,
+                          list_content_rect.x + 5.0f * s,
+                          list_content_rect.y + 5.0f * s + app->text_results.pixel_height,
                           "No matches",
                           theme.fg_secondary,
                           &app->text_results);
@@ -1079,6 +1156,35 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             app_clamp_result_view(app);
         }
         return 0;
+    case WM_DPICHANGED: {
+        if (!app || !app->renderer.device) {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        RECT const *r = (RECT const *)lParam;
+        wchar_t font_path[MAX_PATH];
+        _snwprintf_s(font_path, array_count(font_path), _TRUNCATE, L"%ls\\Fonts\\CascadiaMono.ttf", _wgetenv(L"WINDIR"));
+        u32 old_dpi = app->dpi;
+        f32 old_scale = app->dpi_scale;
+        u32 new_dpi = (u32)LOWORD(wParam);
+        if (new_dpi == 0) {
+            new_dpi = (u32)USER_DEFAULT_SCREEN_DPI;
+        }
+        app_unload_text_systems(app);
+        app->dpi = new_dpi;
+        app->dpi_scale = (f32)new_dpi / (f32)USER_DEFAULT_SCREEN_DPI;
+        if (!app_load_text_systems(app, font_path)) {
+            debug_log_wide(L"app_load_text_systems failed after WM_DPICHANGED; restoring DPI");
+            app->dpi = old_dpi;
+            app->dpi_scale = old_scale;
+            if (!app_load_text_systems(app, font_path)) {
+                debug_log_wide(L"app_load_text_systems failed to restore fonts");
+            }
+        }
+        app_invalidate_icon_textures(app);
+        SetWindowPos(hwnd, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
     case WM_ACTIVATE:
         if (app && LOWORD(wParam) == WA_INACTIVE && app->visible) {
             app_hide(app);
@@ -1211,6 +1317,8 @@ app_init(AppState *app, HINSTANCE instance)
     app->query_scroll_x = 0.0f;
     app->caret_blink_tick_ms = GetTickCount();
     app->caret_blink_on = true;
+    app->dpi = app_primary_monitor_dpi();
+    app->dpi_scale = (f32)app->dpi / (f32)USER_DEFAULT_SCREEN_DPI;
 
     app->permanent_arena = arena_create(gigabytes(1), megabytes(8));
     app->results_arena = arena_create(gigabytes(1), megabytes(4));
@@ -1234,9 +1342,8 @@ app_init(AppState *app, HINSTANCE instance)
     }
     debug_log_wide(L"window class registered");
 
-    s32 initial_width = 920;
-    s32 initial_height = 560;
-    app_window_size_for_rows(app, &initial_width, &initial_height);
+    s32 initial_width = MulDiv(LAUNCHER_BASE_WINDOW_W, (int)app->dpi, USER_DEFAULT_SCREEN_DPI);
+    s32 initial_height = MulDiv(LAUNCHER_BASE_WINDOW_H, (int)app->dpi, USER_DEFAULT_SCREEN_DPI);
     app->hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         LAUNCHER_WINDOW_CLASS,
@@ -1269,20 +1376,19 @@ app_init(AppState *app, HINSTANCE instance)
 
     wchar_t font_path[MAX_PATH];
     _snwprintf_s(font_path, array_count(font_path), _TRUNCATE, L"%ls\\Fonts\\CascadiaMono.ttf", _wgetenv(L"WINDIR"));
-    if (!kb_text_init(&app->text, font_path, 24.0f)) {
-        debug_log_wide(L"kb_text_init failed font=%ls", font_path);
+    if (!app_load_text_systems(app, font_path)) {
+        debug_log_wide(L"app_load_text_systems failed font=%ls", font_path);
         return false;
     }
-    debug_log_wide(L"text initialized");
-    dx11_renderer_upload_atlas(&app->renderer, &app->text.raster, 0);
-    app->text.raster.atlas_dirty = false;
+    debug_log_wide(L"text initialized dpi=%u scale=%f", app->dpi, (double)app->dpi_scale);
 
-    if (!kb_text_init(&app->text_results, font_path, LAUNCHER_RESULTS_FONT_PX)) {
-        debug_log_wide(L"kb_text_init failed (results) font=%ls", font_path);
-        return false;
+    {
+        s32 fit_w = 0;
+        s32 fit_h = 0;
+        app_window_size_for_rows(app, &fit_w, &fit_h);
+        SetWindowPos(app->hwnd, NULL, 0, 0, fit_w, fit_h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        dx11_renderer_resize(&app->renderer, (u32)fit_w, (u32)fit_h);
     }
-    dx11_renderer_upload_atlas(&app->renderer, &app->text_results.raster, 1);
-    app->text_results.raster.atlas_dirty = false;
 
     RegisterHotKey(app->hwnd, LAUNCHER_HOTKEY_ID, MOD_ALT | MOD_NOREPEAT, VK_SPACE);
     debug_log_wide(L"hotkey registered");
@@ -1297,8 +1403,7 @@ app_shutdown(AppState *app)
 {
     UnregisterHotKey(app->hwnd, LAUNCHER_HOTKEY_ID);
     app_shutdown_icon_cache(app);
-    kb_text_shutdown(&app->text_results);
-    kb_text_shutdown(&app->text);
+    app_unload_text_systems(app);
     dx11_renderer_shutdown(&app->renderer);
     arena_destroy(&app->frame_arena);
     arena_destroy(&app->results_arena);
@@ -1312,6 +1417,8 @@ wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_line, int sh
     (void)prev_instance;
     (void)command_line;
     (void)show_code;
+
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(com)) {
