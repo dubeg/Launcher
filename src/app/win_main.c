@@ -10,6 +10,7 @@
 #include "../ui/ui.h"
 
 #include <d3d11.h>
+#include <shobjidl.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <ctype.h>
@@ -90,6 +91,7 @@ static s32 app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 
 static void app_icon_queue_push(AppState *app, s32 entry_index);
 static void app_request_item_icon(AppState *app, const LaunchItem *item);
 static bool app_resample_rgba_bilinear_premul(const u8 *src, s32 src_w, s32 src_h, u8 *dst, s32 dst_w, s32 dst_h);
+static bool app_extract_shell_item_image_rgba(const wchar_t *path, s32 source_size, u8 **out_pixels, s32 *out_width, s32 *out_height, s32 *out_stride);
 static bool app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride);
 static void app_process_icon_queue(AppState *app, s32 budget);
 static void app_shutdown_icon_cache(AppState *app);
@@ -704,6 +706,78 @@ app_resample_rgba_bilinear_premul(const u8 *src, s32 src_w, s32 src_h, u8 *dst, 
 }
 
 static bool
+app_extract_shell_item_image_rgba(const wchar_t *path, s32 source_size, u8 **out_pixels, s32 *out_width, s32 *out_height, s32 *out_stride)
+{
+    if (!path || !path[0] || !out_pixels || !out_width || !out_height || !out_stride || source_size <= 0) {
+        return false;
+    }
+
+    IShellItemImageFactory *factory = NULL;
+    HRESULT hr = SHCreateItemFromParsingName(path, NULL, &IID_IShellItemImageFactory, (void **)&factory);
+    if (FAILED(hr) || !factory) {
+        return false;
+    }
+
+    SIZE size = {source_size, source_size};
+    HBITMAP hbmp = NULL;
+    hr = IShellItemImageFactory_GetImage(factory, size, SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT, &hbmp);
+    IShellItemImageFactory_Release(factory);
+    if (FAILED(hr) || !hbmp) {
+        return false;
+    }
+
+    BITMAP bm;
+    ZeroMemory(&bm, sizeof(bm));
+    if (!GetObjectW(hbmp, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0) {
+        DeleteObject(hbmp);
+        return false;
+    }
+
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = bm.bmWidth;
+    bmi.bmiHeader.biHeight = -bm.bmHeight;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hdc = CreateCompatibleDC(NULL);
+    if (!hdc) {
+        DeleteObject(hbmp);
+        return false;
+    }
+
+    s32 stride = bm.bmWidth * 4;
+    u8 *bgra = (u8 *)heap_alloc_zero((size_t)stride * (size_t)bm.bmHeight);
+    bool ok = false;
+    if (bgra && GetDIBits(hdc, hbmp, 0, (UINT)bm.bmHeight, bgra, &bmi, DIB_RGB_COLORS)) {
+        u8 *rgba = (u8 *)heap_alloc_zero((size_t)stride * (size_t)bm.bmHeight);
+        if (rgba) {
+            for (s32 y = 0; y < bm.bmHeight; ++y) {
+                for (s32 x = 0; x < bm.bmWidth; ++x) {
+                    size_t p = (size_t)(y * stride + x * 4);
+                    rgba[p + 0] = bgra[p + 2];
+                    rgba[p + 1] = bgra[p + 1];
+                    rgba[p + 2] = bgra[p + 0];
+                    rgba[p + 3] = bgra[p + 3];
+                }
+            }
+            *out_pixels = rgba;
+            *out_width = bm.bmWidth;
+            *out_height = bm.bmHeight;
+            *out_stride = stride;
+            ok = true;
+        }
+    }
+
+    heap_free(bgra);
+    DeleteDC(hdc);
+    DeleteObject(hbmp);
+    return ok;
+}
+
+static bool
 app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride)
 {
     if (!path || !path[0] || !out_pixels || !out_stride || icon_size <= 0) {
@@ -733,6 +807,22 @@ app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, 
     }
     if (source_size > 128) {
         source_size = 128;
+    }
+
+    u8 *native_rgba = NULL;
+    s32 native_w = 0;
+    s32 native_h = 0;
+    s32 native_stride = 0;
+    if (app_extract_shell_item_image_rgba(path, source_size, &native_rgba, &native_w, &native_h, &native_stride)) {
+        u8 *pixels = (u8 *)heap_alloc_zero((size_t)icon_size * (size_t)icon_size * 4u);
+        if (pixels) {
+            app_resample_rgba_bilinear_premul(native_rgba, native_w, native_h, pixels, icon_size, icon_size);
+            *out_pixels = pixels;
+            *out_stride = icon_size * 4;
+            heap_free(native_rgba);
+            return true;
+        }
+        heap_free(native_rgba);
     }
 
     BITMAPINFO bmi;
