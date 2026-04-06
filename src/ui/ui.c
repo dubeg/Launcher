@@ -13,8 +13,8 @@ ui_theme_default(void)
     theme.fg_primary = (RenderColor){0.97f, 0.98f, 1.0f, 1.0f};
     theme.fg_secondary = (RenderColor){0.60f, 0.65f, 0.72f, 1.0f};
     theme.fg_footer = (RenderColor){0.56f, 0.60f, 0.66f, 1.0f};
-    theme.mode_pill_bg = (RenderColor){0.22f, 0.45f, 0.82f, 1.0f};
-    theme.mode_pill_fg = (RenderColor){0.95f, 0.96f, 0.98f, 1.0f};
+    theme.mode_pill_bg = (RenderColor){0.14f, 0.22f, 0.36f, 1.0f};
+    theme.mode_pill_fg = (RenderColor){0.78f, 0.82f, 0.88f, 1.0f};
     theme.row_selected_bg = (RenderColor){0.16f, 0.25f, 0.42f, 1.0f};
     theme.input_selection_bg = (RenderColor){0.24f, 0.43f, 0.75f, 0.35f};
     theme.input_caret = (RenderColor){0.97f, 0.98f, 1.0f, 1.0f};
