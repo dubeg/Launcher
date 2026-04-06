@@ -13,7 +13,7 @@
 static const char *g_vertex_shader_source =
     "struct VSIn { float2 pos : POSITION; float2 uv : TEXCOORD0; float4 color : COLOR0; };"
     "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; float4 color : COLOR0; };"
-    "cbuffer Constants : register(b0) { float2 viewport; float2 padding; };"
+    "cbuffer Constants : register(b0) { float2 viewport; float2 padding0; float text_alpha_gamma; float text_gamma_blend; float font_atlas_active; float text_render_mode; float4 text_bg; };"
     "VSOut main(VSIn input) {"
     "  VSOut output;"
     "  float2 ndc = float2((input.pos.x / viewport.x) * 2.0f - 1.0f, 1.0f - (input.pos.y / viewport.y) * 2.0f);"
@@ -26,16 +26,66 @@ static const char *g_vertex_shader_source =
 static const char *g_pixel_shader_source =
     "Texture2D atlas_texture : register(t0);"
     "SamplerState atlas_sampler : register(s0);"
+    "cbuffer Constants : register(b0) { float2 viewport; float2 padding0; float text_alpha_gamma; float text_gamma_blend; float font_atlas_active; float text_render_mode; float4 text_bg; };"
     "struct PSIn { float4 pos : SV_Position; float2 uv : TEXCOORD0; float4 color : COLOR0; };"
+    "float3 kb_srgb_to_linear3(float3 c) {"
+    "  float3 low = c / 12.92f;"
+    "  float3 high = pow((c + 0.055f) / 1.055f, 2.4f);"
+    "  float3 t = float3(1.0f, 1.0f, 1.0f) - step(0.04045f, c);"
+    "  return lerp(high, low, t);"
+    "}"
+    "float3 kb_linear_to_srgb3(float3 c) {"
+    "  float3 low = 12.92f * c;"
+    "  float3 high = 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;"
+    "  float3 t = float3(1.0f, 1.0f, 1.0f) - step(0.0031308f, c);"
+    "  return lerp(high, low, t);"
+    "}"
     "float4 main(PSIn input) : SV_Target {"
     "  if (input.uv.x < 0.0f) return input.color;"
     "  float4 texel = atlas_texture.Sample(atlas_sampler, input.uv);"
+    "  if (font_atlas_active > 0.5f) {"
+    "    float a_in = saturate(texel.a);"
+    "    float g = max(text_alpha_gamma, 0.001f);"
+    "    float a_gamma = pow(a_in, 1.0f / g);"
+    "    float w = saturate(text_gamma_blend);"
+    "    float a_legacy = lerp(a_in, a_gamma, w);"
+    "    if (text_render_mode < 0.5f) {"
+    "      float4 o;"
+    "      o.rgb = texel.rgb * input.color.rgb;"
+    "      o.a = a_legacy * input.color.a;"
+    "      return o;"
+    "    }"
+    "    if (text_render_mode < 1.5f) {"
+    "      float4 o;"
+    "      o.rgb = texel.rgb * input.color.rgb;"
+    "      o.a = a_in * input.color.a;"
+    "      return o;"
+    "    }"
+    "    if (text_render_mode < 2.5f) {"
+    "      float4 o;"
+    "      o.rgb = texel.rgb * input.color.rgb;"
+    "      o.a = a_gamma * input.color.a;"
+    "      return o;"
+    "    }"
+    "    float a = a_legacy * input.color.a;"
+    "    float3 fg_s = texel.rgb * input.color.rgb;"
+    "    float3 fg_lin = kb_srgb_to_linear3(fg_s);"
+    "    float3 bg_lin = kb_srgb_to_linear3(text_bg.rgb);"
+    "    float3 out_lin = lerp(bg_lin, fg_lin, a);"
+    "    float3 out_s = kb_linear_to_srgb3(out_lin);"
+    "    return float4(out_s, 1.0f);"
+    "  }"
     "  return texel * input.color;"
     "}";
 
 typedef struct RendererConstants {
     f32 viewport[2];
-    f32 padding[2];
+    f32 padding0[2];
+    f32 text_alpha_gamma;
+    f32 text_gamma_blend;
+    f32 font_atlas_active;
+    f32 text_render_mode;
+    f32 text_bg[4];
 } RendererConstants;
 
 static void
@@ -265,6 +315,10 @@ dx11_renderer_init(Dx11Renderer *renderer, HWND hwnd, u32 width, u32 height)
     renderer->vertices = (RendererVertex *)heap_alloc_zero(sizeof(RendererVertex) * 4096);
     renderer->vertex_capacity = 4096;
     renderer->text_snap_pixels = true;
+    renderer->text_alpha_gamma = 1.8f;
+    renderer->text_gamma_blend = 0.88f;
+    renderer->text_render_mode = TextRenderMode_FullGammaAlpha;
+    renderer->frame_clear_color = (RenderColor){0.0f, 0.0f, 0.0f, 1.0f};
     return true;
 }
 
@@ -344,6 +398,7 @@ dx11_renderer_begin(Dx11Renderer *renderer, RenderColor clear_color)
 {
     renderer->vertex_count = 0;
     renderer->pending_text_srv = NULL;
+    renderer->frame_clear_color = clear_color;
     FLOAT color[4] = {clear_color.r, clear_color.g, clear_color.b, clear_color.a};
     ID3D11DeviceContext_OMSetRenderTargets(renderer->context, 1, &renderer->rtv, NULL);
     ID3D11DeviceContext_ClearRenderTargetView(renderer->context, renderer->rtv, color);
@@ -398,6 +453,44 @@ dx11_renderer_toggle_text_pixel_snap(Dx11Renderer *renderer)
     }
     renderer->text_snap_pixels = !renderer->text_snap_pixels;
     return renderer->text_snap_pixels;
+}
+
+void
+dx11_renderer_set_text_alpha_gamma(Dx11Renderer *renderer, f32 gamma)
+{
+    if (renderer) {
+        renderer->text_alpha_gamma = gamma;
+    }
+}
+
+void
+dx11_renderer_set_text_gamma_blend(Dx11Renderer *renderer, f32 blend)
+{
+    if (renderer) {
+        renderer->text_gamma_blend = blend;
+    }
+}
+
+void
+dx11_renderer_set_text_render_mode(Dx11Renderer *renderer, u32 mode)
+{
+    if (!renderer) {
+        return;
+    }
+    if (mode >= TextRenderMode_Count) {
+        mode = TextRenderMode_Legacy;
+    }
+    renderer->text_render_mode = mode;
+}
+
+u32
+dx11_renderer_cycle_text_render_mode(Dx11Renderer *renderer)
+{
+    if (!renderer) {
+        return 0;
+    }
+    renderer->text_render_mode = (renderer->text_render_mode + 1) % TextRenderMode_Count;
+    return renderer->text_render_mode;
 }
 
 void
@@ -491,7 +584,21 @@ dx11_renderer_flush(Dx11Renderer *renderer)
                      (LONG)renderer->scissor_bottom};
     ID3D11DeviceContext_RSSetScissorRects(renderer->context, 1, &sr);
 
-    RendererConstants constants = {{(f32)renderer->width, (f32)renderer->height}, {0, 0}};
+    RendererConstants constants;
+    ZeroMemory(&constants, sizeof(constants));
+    constants.viewport[0] = (f32)renderer->width;
+    constants.viewport[1] = (f32)renderer->height;
+    constants.text_alpha_gamma = renderer->text_alpha_gamma;
+    constants.text_gamma_blend = renderer->text_gamma_blend;
+    constants.font_atlas_active = 0.0f;
+    if (renderer->pending_text_srv == renderer->atlas_srv || renderer->pending_text_srv == renderer->atlas_srv_b) {
+        constants.font_atlas_active = 1.0f;
+    }
+    constants.text_render_mode = (f32)renderer->text_render_mode;
+    constants.text_bg[0] = renderer->frame_clear_color.r;
+    constants.text_bg[1] = renderer->frame_clear_color.g;
+    constants.text_bg[2] = renderer->frame_clear_color.b;
+    constants.text_bg[3] = 0.0f;
     ID3D11Buffer *constant_buffer = NULL;
     D3D11_BUFFER_DESC cb_desc;
     ZeroMemory(&cb_desc, sizeof(cb_desc));
@@ -502,6 +609,7 @@ dx11_renderer_flush(Dx11Renderer *renderer)
     cb_data.pSysMem = &constants;
     if (SUCCEEDED(ID3D11Device_CreateBuffer(renderer->device, &cb_desc, &cb_data, &constant_buffer))) {
         ID3D11DeviceContext_VSSetConstantBuffers(renderer->context, 0, 1, &constant_buffer);
+        ID3D11DeviceContext_PSSetConstantBuffers(renderer->context, 0, 1, &constant_buffer);
         ID3D11Buffer_Release(constant_buffer);
     }
 

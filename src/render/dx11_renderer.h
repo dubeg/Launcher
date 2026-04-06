@@ -29,6 +29,14 @@ typedef struct Dx11Texture {
     u32 height;
 } Dx11Texture;
 
+typedef enum TextRenderMode {
+    TextRenderMode_Legacy = 0,
+    TextRenderMode_RawAlpha = 1,
+    TextRenderMode_FullGammaAlpha = 2,
+    TextRenderMode_LinearCompositeBg = 3,
+    TextRenderMode_Count = 4,
+} TextRenderMode;
+
 typedef struct Dx11Renderer {
     HWND hwnd;
     u32 width;
@@ -60,6 +68,10 @@ typedef struct Dx11Renderer {
     u32 scissor_right;
     u32 scissor_bottom;
     bool text_snap_pixels;
+    f32 text_alpha_gamma;
+    f32 text_gamma_blend;
+    u32 text_render_mode;
+    RenderColor frame_clear_color;
 } Dx11Renderer;
 
 bool dx11_renderer_init(Dx11Renderer *renderer, HWND hwnd, u32 width, u32 height);
@@ -72,6 +84,10 @@ void dx11_renderer_draw_rect(Dx11Renderer *renderer, f32 x, f32 y, f32 w, f32 h,
 void dx11_renderer_draw_text(Dx11Renderer *renderer, const ShapedText *text, RenderColor color);
 void dx11_renderer_set_text_pixel_snap(Dx11Renderer *renderer, bool enabled);
 bool dx11_renderer_toggle_text_pixel_snap(Dx11Renderer *renderer);
+void dx11_renderer_set_text_alpha_gamma(Dx11Renderer *renderer, f32 gamma);
+void dx11_renderer_set_text_gamma_blend(Dx11Renderer *renderer, f32 blend);
+void dx11_renderer_set_text_render_mode(Dx11Renderer *renderer, u32 mode);
+u32 dx11_renderer_cycle_text_render_mode(Dx11Renderer *renderer);
 void dx11_renderer_draw_image(Dx11Renderer *renderer, f32 x, f32 y, f32 w, f32 h, RenderColor color);
 void dx11_renderer_upload_atlas(Dx11Renderer *renderer, const FontRaster *raster, u32 atlas_index);
 bool dx11_renderer_create_texture_rgba(Dx11Renderer *renderer, s32 width, s32 height, const void *pixels, Dx11Texture *out_texture);

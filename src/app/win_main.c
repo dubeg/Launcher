@@ -34,6 +34,34 @@
 #define LAUNCHER_ICON_CACHE_CAPACITY 512
 #define LAUNCHER_ICON_QUEUE_CAPACITY 1024
 
+static const f32 k_debug_text_gamma_presets[] = {
+    1.0f,
+    1.6f,
+    1.8f,
+    2.2f,
+    2.4f,
+    2.8f,
+};
+static const u32 k_debug_text_gamma_preset_count = sizeof(k_debug_text_gamma_presets) / sizeof(k_debug_text_gamma_presets[0]);
+static u32 s_debug_text_gamma_preset_index = 2;
+
+static const f32 k_debug_text_gamma_blend_presets[] = {
+    1.0f,
+    0.95f,
+    0.88f,
+    0.82f,
+    0.75f,
+};
+static const u32 k_debug_text_gamma_blend_preset_count = sizeof(k_debug_text_gamma_blend_presets) / sizeof(k_debug_text_gamma_blend_presets[0]);
+static u32 s_debug_text_gamma_blend_index = 2;
+
+static const char *k_text_render_mode_names[] = {
+    "legacy",
+    "raw",
+    "gammaA",
+    "linBg",
+};
+
 typedef enum AppIconState {
     AppIconState_Missing = 0,
     AppIconState_Queued = 1,
@@ -536,13 +564,13 @@ draw_text_line_font(AppState *app, KbTextSystem *font, Arena *frame, f32 x, f32 
 
     f32 shape_x = x;
     f32 shape_y = baseline_y;
-    if (app->renderer.text_snap_pixels && font == &app->text_results) {
+    if (app->renderer.text_snap_pixels) {
         shape_x = floorf(x + 0.5f);
         shape_y = floorf(baseline_y + 0.5f);
     }
 
     ShapedText shaped = kb_text_shape(frame, font, text, shape_x, shape_y);
-    if (app->renderer.text_snap_pixels && font == &app->text_results) {
+    if (app->renderer.text_snap_pixels) {
         kb_text_snap_shaped_quads_to_pixels(&shaped);
     }
     dx11_renderer_draw_text(&app->renderer, &shaped, color);
@@ -1138,14 +1166,43 @@ app_render(AppState *app)
     scrollbar.top_index = app->results_top_index;
     ui_control_scrollbar(&draw_list, &scrollbar, theme.scrollbar_track, theme.scrollbar_thumb);
 
-    char diagnostics[128];
-    _snprintf_s(diagnostics, sizeof(diagnostics), _TRUNCATE, "Mode: %s | Results: %u",
+    char diagnostics[160];
+    u32 tm = app->renderer.text_render_mode;
+    const char *tname = (tm < array_count(k_text_render_mode_names)) ? k_text_render_mode_names[tm] : "?";
+    _snprintf_s(diagnostics, sizeof(diagnostics), _TRUNCATE, "Mode: %s | Results: %u | text:%s | g %.2f b %.2f",
         app->mode == SearchMode_Apps ? "Apps" : "Files",
-        app->results.count);
+        app->results.count,
+        tname,
+        (double)app->renderer.text_alpha_gamma,
+        (double)app->renderer.text_gamma_blend);
     ui_control_footer(&draw_list, footer_rect, diagnostics, theme.fg_footer, &app->text_results);
 
     app_flush_ui_draw_list(app, &draw_list, width, height);
     dx11_renderer_end(&app->renderer);
+}
+
+static void
+app_cycle_text_gamma_preset(AppState *app)
+{
+    s_debug_text_gamma_preset_index = (s_debug_text_gamma_preset_index + 1) % k_debug_text_gamma_preset_count;
+    f32 g = k_debug_text_gamma_presets[s_debug_text_gamma_preset_index];
+    dx11_renderer_set_text_alpha_gamma(&app->renderer, g);
+    debug_log_wide(L"Text alpha gamma: %.2f (%u/%u)",
+                   (double)g,
+                   (unsigned int)(s_debug_text_gamma_preset_index + 1u),
+                   (unsigned int)k_debug_text_gamma_preset_count);
+}
+
+static void
+app_cycle_text_gamma_blend_preset(AppState *app)
+{
+    s_debug_text_gamma_blend_index = (s_debug_text_gamma_blend_index + 1) % k_debug_text_gamma_blend_preset_count;
+    f32 b = k_debug_text_gamma_blend_presets[s_debug_text_gamma_blend_index];
+    dx11_renderer_set_text_gamma_blend(&app->renderer, b);
+    debug_log_wide(L"Text gamma blend: %.2f (%u/%u) (1=full gamma, 0=raw alpha)",
+                   (double)b,
+                   (unsigned int)(s_debug_text_gamma_blend_index + 1u),
+                   (unsigned int)k_debug_text_gamma_blend_preset_count);
 }
 
 static LRESULT CALLBACK
@@ -1273,6 +1330,26 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 bool snap_on = dx11_renderer_toggle_text_pixel_snap(&app->renderer);
                 debug_log_wide(L"Text pixel snap: %ls", snap_on ? L"on" : L"off");
             } break;
+            case VK_F7:
+                app_cycle_text_gamma_preset(app);
+                break;
+            case VK_F8:
+                app_cycle_text_gamma_blend_preset(app);
+                break;
+            case VK_F9: {
+                u32 m = dx11_renderer_cycle_text_render_mode(&app->renderer);
+                const wchar_t *wname = L"?";
+                if (m < array_count(k_text_render_mode_names)) {
+                    switch (m) {
+                    case 0: wname = L"legacy"; break;
+                    case 1: wname = L"raw"; break;
+                    case 2: wname = L"gammaA"; break;
+                    case 3: wname = L"linBg (vs frame clear)"; break;
+                    default: break;
+                    }
+                }
+                debug_log_wide(L"Text render mode: %ls (%u/%u)", wname, (unsigned int)(m + 1), (unsigned int)TextRenderMode_Count);
+            } break;
             default: handled = false; break;
             }
             if (query_changed) {
@@ -1385,6 +1462,9 @@ app_init(AppState *app, HINSTANCE instance)
         debug_log_wide(L"dx11_renderer_init failed");
         return false;
     }
+    dx11_renderer_set_text_alpha_gamma(&app->renderer, k_debug_text_gamma_presets[s_debug_text_gamma_preset_index]);
+    dx11_renderer_set_text_gamma_blend(&app->renderer, k_debug_text_gamma_blend_presets[s_debug_text_gamma_blend_index]);
+    dx11_renderer_set_text_render_mode(&app->renderer, TextRenderMode_FullGammaAlpha);
     debug_log_wide(L"renderer initialized");
 
     if (!icon_worker_init(&app->icon_worker)) {
