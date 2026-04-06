@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <math.h>
 #include <string.h>
 
 #pragma comment(lib, "d3d11.lib")
@@ -116,6 +117,12 @@ push_vertex(Dx11Renderer *renderer, RendererVertex v)
         renderer->vertex_capacity = new_capacity;
     }
     renderer->vertices[renderer->vertex_count++] = v;
+}
+
+static f32
+snap_pixel(f32 x)
+{
+    return floorf(x + 0.5f);
 }
 
 static void
@@ -233,6 +240,12 @@ dx11_renderer_init(Dx11Renderer *renderer, HWND hwnd, u32 width, u32 height)
         return false;
     }
 
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    hr = ID3D11Device_CreateSamplerState(renderer->device, &sampler_desc, &renderer->sampler_font);
+    if (FAILED(hr)) {
+        return false;
+    }
+
     D3D11_RASTERIZER_DESC rs_desc;
     ZeroMemory(&rs_desc, sizeof(rs_desc));
     rs_desc.FillMode = D3D11_FILL_SOLID;
@@ -271,6 +284,7 @@ dx11_renderer_shutdown(Dx11Renderer *renderer)
     safe_release((IUnknown **)&renderer->pixel_shader);
     safe_release((IUnknown **)&renderer->vertex_shader);
     safe_release((IUnknown **)&renderer->rasterizer);
+    safe_release((IUnknown **)&renderer->sampler_font);
     safe_release((IUnknown **)&renderer->sampler);
     safe_release((IUnknown **)&renderer->blend_state);
     safe_release((IUnknown **)&renderer->rtv);
@@ -355,7 +369,11 @@ dx11_renderer_draw_text(Dx11Renderer *renderer, const ShapedText *text, RenderCo
 {
     for (u32 i = 0; i < text->count; ++i) {
         const TextQuad *quad = &text->quads[i];
-        push_quad(renderer, quad->x0, quad->y0, quad->x1, quad->y1, quad->u0, quad->v0, quad->u1, quad->v1, color);
+        f32 w = quad->x1 - quad->x0;
+        f32 h = quad->y1 - quad->y0;
+        f32 x0 = snap_pixel(quad->x0);
+        f32 y0 = snap_pixel(quad->y0);
+        push_quad(renderer, x0, y0, x0 + w, y0 + h, quad->u0, quad->v0, quad->u1, quad->v1, color);
     }
 }
 
@@ -440,7 +458,11 @@ dx11_renderer_flush(Dx11Renderer *renderer)
     ID3D11DeviceContext_PSSetShader(renderer->context, renderer->pixel_shader, NULL, 0);
     ID3D11DeviceContext_RSSetState(renderer->context, renderer->rasterizer);
     ID3D11DeviceContext_OMSetBlendState(renderer->context, renderer->blend_state, NULL, 0xffffffffu);
-    ID3D11DeviceContext_PSSetSamplers(renderer->context, 0, 1, &renderer->sampler);
+    ID3D11SamplerState *ps_sampler = renderer->sampler;
+    if (renderer->pending_text_srv == renderer->atlas_srv || renderer->pending_text_srv == renderer->atlas_srv_b) {
+        ps_sampler = renderer->sampler_font;
+    }
+    ID3D11DeviceContext_PSSetSamplers(renderer->context, 0, 1, &ps_sampler);
 
     D3D11_RECT sr = {(LONG)renderer->scissor_left, (LONG)renderer->scissor_top, (LONG)renderer->scissor_right,
                      (LONG)renderer->scissor_bottom};

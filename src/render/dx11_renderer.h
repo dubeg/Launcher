@@ -39,6 +39,7 @@ typedef struct Dx11Renderer {
     struct ID3D11RenderTargetView *rtv;
     struct ID3D11BlendState *blend_state;
     struct ID3D11SamplerState *sampler;
+    struct ID3D11SamplerState *sampler_font;
     struct ID3D11RasterizerState *rasterizer;
     struct ID3D11VertexShader *vertex_shader;
     struct ID3D11PixelShader *pixel_shader;
