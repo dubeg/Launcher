@@ -248,6 +248,9 @@ app_show(AppState *app)
 {
     app->visible = true;
     debug_log_wide(L"app_show");
+    app->query_anchor = 0;
+    app_query_set_caret(app, app->query_length, true);
+    app->query_scroll_x = 0.0f;
     app_center_window(app);
     ShowWindow(app->hwnd, SW_SHOW);
     SetForegroundWindow(app->hwnd);
