@@ -3,6 +3,7 @@
 #include "../core/base.h"
 #include "../platform/catalog.h"
 #include "../platform/everything_client.h"
+#include "../platform/icon_worker.h"
 #include "../platform/launch.h"
 #include "../render/dx11_renderer.h"
 #include "../search/fuzzy.h"
@@ -10,11 +11,9 @@
 #include "../ui/ui.h"
 
 #include <d3d11.h>
-#include <shobjidl.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <ctype.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +38,7 @@ typedef enum AppIconState {
 typedef struct AppIconEntry {
     wchar_t *path;
     s32 icon_index;
+    u32 generation;
     AppIconState state;
     Dx11Texture texture;
     u32 last_used_frame;
@@ -71,9 +71,7 @@ typedef struct AppState {
     char query[LAUNCHER_MAX_QUERY];
     AppIconEntry icon_cache[LAUNCHER_ICON_CACHE_CAPACITY];
     s32 icon_cache_count;
-    s32 icon_queue[LAUNCHER_ICON_QUEUE_CAPACITY];
-    s32 icon_queue_read;
-    s32 icon_queue_write;
+    IconWorker icon_worker;
     u32 frame_counter;
 } AppState;
 
@@ -88,12 +86,8 @@ static void app_clamp_results_top_bounds(AppState *app);
 static void app_window_size_for_rows(AppState *app, s32 *out_width, s32 *out_height);
 static s32 app_find_icon_entry(AppState *app, const wchar_t *path, s32 icon_index);
 static s32 app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 icon_index);
-static void app_icon_queue_push(AppState *app, s32 entry_index);
 static void app_request_item_icon(AppState *app, const LaunchItem *item);
-static bool app_resample_rgba_bilinear_premul(const u8 *src, s32 src_w, s32 src_h, u8 *dst, s32 dst_w, s32 dst_h);
-static bool app_extract_shell_item_image_rgba(const wchar_t *path, s32 source_size, u8 **out_pixels, s32 *out_width, s32 *out_height, s32 *out_stride);
-static bool app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride);
-static void app_process_icon_queue(AppState *app, s32 budget);
+static void app_process_icon_completions(AppState *app, s32 budget);
 static void app_shutdown_icon_cache(AppState *app);
 
 static s32
@@ -572,6 +566,7 @@ app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 icon_index)
         ZeroMemory(entry, sizeof(*entry));
         entry->path = arena_wcsdup(&app->permanent_arena, path);
         entry->icon_index = icon_index;
+        entry->generation = 1;
         entry->state = AppIconState_Missing;
         return idx;
     }
@@ -588,307 +583,13 @@ app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 icon_index)
     dx11_renderer_destroy_texture(&entry->texture);
     entry->path = arena_wcsdup(&app->permanent_arena, path);
     entry->icon_index = icon_index;
+    entry->generation += 1;
+    if (entry->generation == 0) {
+        entry->generation = 1;
+    }
     entry->state = AppIconState_Missing;
     entry->last_used_frame = app->frame_counter;
     return replace;
-}
-
-static void
-app_icon_queue_push(AppState *app, s32 entry_index)
-{
-    s32 next_write = (app->icon_queue_write + 1) % LAUNCHER_ICON_QUEUE_CAPACITY;
-    if (next_write == app->icon_queue_read) {
-        return;
-    }
-    app->icon_queue[app->icon_queue_write] = entry_index;
-    app->icon_queue_write = next_write;
-}
-
-static bool
-app_resample_rgba_bilinear_premul(const u8 *src, s32 src_w, s32 src_h, u8 *dst, s32 dst_w, s32 dst_h)
-{
-    if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
-        return false;
-    }
-
-    /* Area resampling in premultiplied alpha gives better quality than
-       point/bilinear when shrinking icons aggressively. */
-    f32 scale_x = (f32)src_w / (f32)dst_w;
-    f32 scale_y = (f32)src_h / (f32)dst_h;
-    for (s32 y = 0; y < dst_h; ++y) {
-        f32 y0f = (f32)y * scale_y;
-        f32 y1f = (f32)(y + 1) * scale_y;
-        s32 sy0 = (s32)floorf(y0f);
-        s32 sy1 = (s32)ceilf(y1f);
-        if (sy0 < 0) {
-            sy0 = 0;
-        }
-        if (sy1 > src_h) {
-            sy1 = src_h;
-        }
-        for (s32 x = 0; x < dst_w; ++x) {
-            f32 x0f = (f32)x * scale_x;
-            f32 x1f = (f32)(x + 1) * scale_x;
-            s32 sx0 = (s32)floorf(x0f);
-            s32 sx1 = (s32)ceilf(x1f);
-            if (sx0 < 0) {
-                sx0 = 0;
-            }
-            if (sx1 > src_w) {
-                sx1 = src_w;
-            }
-
-            f32 acc_a = 0.0f;
-            f32 acc_rp = 0.0f;
-            f32 acc_gp = 0.0f;
-            f32 acc_bp = 0.0f;
-            f32 total_w = 0.0f;
-
-            for (s32 sy = sy0; sy < sy1; ++sy) {
-                f32 py0 = (f32)sy;
-                f32 py1 = (f32)(sy + 1);
-                f32 wy0 = y0f > py0 ? y0f : py0;
-                f32 wy1 = y1f < py1 ? y1f : py1;
-                f32 wy = wy1 - wy0;
-                if (wy <= 0.0f) {
-                    continue;
-                }
-                for (s32 sx = sx0; sx < sx1; ++sx) {
-                    f32 px0 = (f32)sx;
-                    f32 px1 = (f32)(sx + 1);
-                    f32 wx0 = x0f > px0 ? x0f : px0;
-                    f32 wx1 = x1f < px1 ? x1f : px1;
-                    f32 wx = wx1 - wx0;
-                    if (wx <= 0.0f) {
-                        continue;
-                    }
-
-                    f32 w = wx * wy;
-                    const u8 *p = src + ((size_t)sy * (size_t)src_w + (size_t)sx) * 4u;
-                    f32 a = (f32)p[3] / 255.0f;
-                    acc_a += a * w;
-                    acc_rp += ((f32)p[0] * a) * w;
-                    acc_gp += ((f32)p[1] * a) * w;
-                    acc_bp += ((f32)p[2] * a) * w;
-                    total_w += w;
-                }
-            }
-
-            f32 a = 0.0f;
-            f32 rp = 0.0f;
-            f32 gp = 0.0f;
-            f32 bp = 0.0f;
-            if (total_w > 0.00001f) {
-                a = acc_a / total_w;
-                rp = acc_rp / total_w;
-                gp = acc_gp / total_w;
-                bp = acc_bp / total_w;
-            }
-
-            u8 out_a = (u8)(a * 255.0f + 0.5f);
-            u8 out_r = 0;
-            u8 out_g = 0;
-            u8 out_b = 0;
-            if (a > 0.0001f) {
-                out_r = (u8)(rp / a + 0.5f);
-                out_g = (u8)(gp / a + 0.5f);
-                out_b = (u8)(bp / a + 0.5f);
-            }
-
-            u8 *out = dst + ((size_t)y * (size_t)dst_w + (size_t)x) * 4u;
-            out[0] = out_r;
-            out[1] = out_g;
-            out[2] = out_b;
-            out[3] = out_a;
-        }
-    }
-    return true;
-}
-
-static bool
-app_extract_shell_item_image_rgba(const wchar_t *path, s32 source_size, u8 **out_pixels, s32 *out_width, s32 *out_height, s32 *out_stride)
-{
-    if (!path || !path[0] || !out_pixels || !out_width || !out_height || !out_stride || source_size <= 0) {
-        return false;
-    }
-
-    IShellItemImageFactory *factory = NULL;
-    HRESULT hr = SHCreateItemFromParsingName(path, NULL, &IID_IShellItemImageFactory, (void **)&factory);
-    if (FAILED(hr) || !factory) {
-        return false;
-    }
-
-    SIZE size = {source_size, source_size};
-    HBITMAP hbmp = NULL;
-    hr = IShellItemImageFactory_GetImage(factory, size, SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT, &hbmp);
-    IShellItemImageFactory_Release(factory);
-    if (FAILED(hr) || !hbmp) {
-        return false;
-    }
-
-    BITMAP bm;
-    ZeroMemory(&bm, sizeof(bm));
-    if (!GetObjectW(hbmp, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0) {
-        DeleteObject(hbmp);
-        return false;
-    }
-
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = bm.bmWidth;
-    bmi.bmiHeader.biHeight = -bm.bmHeight;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    HDC hdc = CreateCompatibleDC(NULL);
-    if (!hdc) {
-        DeleteObject(hbmp);
-        return false;
-    }
-
-    s32 stride = bm.bmWidth * 4;
-    u8 *bgra = (u8 *)heap_alloc_zero((size_t)stride * (size_t)bm.bmHeight);
-    bool ok = false;
-    if (bgra && GetDIBits(hdc, hbmp, 0, (UINT)bm.bmHeight, bgra, &bmi, DIB_RGB_COLORS)) {
-        u8 *rgba = (u8 *)heap_alloc_zero((size_t)stride * (size_t)bm.bmHeight);
-        if (rgba) {
-            for (s32 y = 0; y < bm.bmHeight; ++y) {
-                for (s32 x = 0; x < bm.bmWidth; ++x) {
-                    size_t p = (size_t)(y * stride + x * 4);
-                    rgba[p + 0] = bgra[p + 2];
-                    rgba[p + 1] = bgra[p + 1];
-                    rgba[p + 2] = bgra[p + 0];
-                    rgba[p + 3] = bgra[p + 3];
-                }
-            }
-            *out_pixels = rgba;
-            *out_width = bm.bmWidth;
-            *out_height = bm.bmHeight;
-            *out_stride = stride;
-            ok = true;
-        }
-    }
-
-    heap_free(bgra);
-    DeleteDC(hdc);
-    DeleteObject(hbmp);
-    return ok;
-}
-
-static bool
-app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride)
-{
-    if (!path || !path[0] || !out_pixels || !out_stride || icon_size <= 0) {
-        return false;
-    }
-
-    SHFILEINFOW info;
-    ZeroMemory(&info, sizeof(info));
-    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
-    if (icon_index >= 0) {
-        flags |= SHGFI_SYSICONINDEX;
-    }
-    if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
-        ZeroMemory(&info, sizeof(info));
-        flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES;
-        if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
-            return false;
-        }
-    }
-    if (!info.hIcon) {
-        return false;
-    }
-
-    s32 source_size = icon_size * 3;
-    if (source_size < 48) {
-        source_size = 48;
-    }
-    if (source_size > 128) {
-        source_size = 128;
-    }
-
-    u8 *native_rgba = NULL;
-    s32 native_w = 0;
-    s32 native_h = 0;
-    s32 native_stride = 0;
-    if (app_extract_shell_item_image_rgba(path, source_size, &native_rgba, &native_w, &native_h, &native_stride)) {
-        u8 *pixels = (u8 *)heap_alloc_zero((size_t)icon_size * (size_t)icon_size * 4u);
-        if (pixels) {
-            app_resample_rgba_bilinear_premul(native_rgba, native_w, native_h, pixels, icon_size, icon_size);
-            *out_pixels = pixels;
-            *out_stride = icon_size * 4;
-            heap_free(native_rgba);
-            return true;
-        }
-        heap_free(native_rgba);
-    }
-
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = source_size;
-    bmi.bmiHeader.biHeight = -source_size;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    HDC hdc = CreateCompatibleDC(NULL);
-    if (!hdc) {
-        DestroyIcon(info.hIcon);
-        return false;
-    }
-
-    void *dib_pixels = NULL;
-    HBITMAP dib = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &dib_pixels, NULL, 0);
-    if (!dib || !dib_pixels) {
-        DeleteDC(hdc);
-        DestroyIcon(info.hIcon);
-        return false;
-    }
-
-    HGDIOBJ old_obj = SelectObject(hdc, dib);
-    PatBlt(hdc, 0, 0, source_size, source_size, BLACKNESS);
-    DrawIconEx(hdc, 0, 0, info.hIcon, source_size, source_size, 0, NULL, DI_NORMAL);
-
-    s32 stride = icon_size * 4;
-    u8 *pixels = (u8 *)heap_alloc_zero((size_t)stride * (size_t)icon_size);
-    if (pixels) {
-        const u8 *src = (const u8 *)dib_pixels;
-        s32 src_stride = source_size * 4;
-        u8 *src_rgba = (u8 *)heap_alloc_zero((size_t)src_stride * (size_t)source_size);
-        if (src_rgba) {
-            for (s32 y = 0; y < source_size; ++y) {
-                for (s32 x = 0; x < source_size; ++x) {
-                    size_t p = (size_t)(y * src_stride + x * 4);
-                    u8 b = src[p + 0];
-                    u8 g = src[p + 1];
-                    u8 r = src[p + 2];
-                    u8 a = src[p + 3];
-                    src_rgba[p + 0] = r;
-                    src_rgba[p + 1] = g;
-                    src_rgba[p + 2] = b;
-                    src_rgba[p + 3] = a;
-                }
-            }
-            app_resample_rgba_bilinear_premul(src_rgba, source_size, source_size, pixels, icon_size, icon_size);
-            heap_free(src_rgba);
-        } else {
-            heap_free(pixels);
-            pixels = NULL;
-        }
-        if (pixels) {
-            *out_pixels = pixels;
-            *out_stride = stride;
-        }
-    }
-
-    SelectObject(hdc, old_obj);
-    DeleteObject(dib);
-    DeleteDC(hdc);
-    DestroyIcon(info.hIcon);
-    return pixels != NULL;
 }
 
 static void
@@ -909,41 +610,50 @@ app_request_item_icon(AppState *app, const LaunchItem *item)
     AppIconEntry *entry = &app->icon_cache[idx];
     entry->last_used_frame = app->frame_counter;
     if (entry->state == AppIconState_Missing) {
-        entry->state = AppIconState_Queued;
-        app_icon_queue_push(app, idx);
+        IconWorkerRequest request;
+        ZeroMemory(&request, sizeof(request));
+        request.entry_index = idx;
+        request.generation = entry->generation;
+        request.icon_index = entry->icon_index;
+        request.icon_size = LAUNCHER_ICON_SIZE_PX;
+        wcsncpy_s(request.path, array_count(request.path), entry->path, _TRUNCATE);
+        if (icon_worker_submit(&app->icon_worker, &request)) {
+            entry->state = AppIconState_Queued;
+        } else {
+            entry->state = AppIconState_Failed;
+        }
     }
 }
 
 static void
-app_process_icon_queue(AppState *app, s32 budget)
+app_process_icon_completions(AppState *app, s32 budget)
 {
     if (!app || budget <= 0) {
         return;
     }
-    while (budget-- > 0 && app->icon_queue_read != app->icon_queue_write) {
-        s32 idx = app->icon_queue[app->icon_queue_read];
-        app->icon_queue_read = (app->icon_queue_read + 1) % LAUNCHER_ICON_QUEUE_CAPACITY;
-        if (idx < 0 || idx >= app->icon_cache_count) {
+    IconWorkerResult result;
+    while (budget-- > 0 && icon_worker_take_completed(&app->icon_worker, &result)) {
+        if (result.entry_index < 0 || result.entry_index >= app->icon_cache_count) {
+            icon_worker_free_result(&result);
             continue;
         }
-        AppIconEntry *entry = &app->icon_cache[idx];
-        if (entry->state != AppIconState_Queued || !entry->path) {
+        AppIconEntry *entry = &app->icon_cache[result.entry_index];
+        if (entry->generation != result.generation) {
+            icon_worker_free_result(&result);
             continue;
         }
-        u8 *pixels = NULL;
-        s32 stride = 0;
-        if (!app_extract_shell_icon_rgba(entry->path, entry->icon_index, LAUNCHER_ICON_SIZE_PX, &pixels, &stride)) {
+        if (!result.success || !result.pixels) {
             entry->state = AppIconState_Failed;
+            icon_worker_free_result(&result);
             continue;
         }
-        (void)stride;
         dx11_renderer_destroy_texture(&entry->texture);
-        if (dx11_renderer_create_texture_rgba(&app->renderer, LAUNCHER_ICON_SIZE_PX, LAUNCHER_ICON_SIZE_PX, pixels, &entry->texture)) {
+        if (dx11_renderer_create_texture_rgba(&app->renderer, result.width, result.height, result.pixels, &entry->texture)) {
             entry->state = AppIconState_Ready;
         } else {
             entry->state = AppIconState_Failed;
         }
-        heap_free(pixels);
+        icon_worker_free_result(&result);
     }
 }
 
@@ -953,6 +663,7 @@ app_shutdown_icon_cache(AppState *app)
     if (!app) {
         return;
     }
+    icon_worker_shutdown(&app->icon_worker);
     for (s32 i = 0; i < app->icon_cache_count; ++i) {
         dx11_renderer_destroy_texture(&app->icon_cache[i].texture);
     }
@@ -1192,7 +903,7 @@ app_render(AppState *app)
 
     arena_reset(&app->frame_arena);
     app->frame_counter += 1;
-    app_process_icon_queue(app, 2);
+    app_process_icon_completions(app, 8);
     dx11_renderer_begin(&app->renderer, (RenderColor){0.06f, 0.07f, 0.09f, 1.0f});
     UiDrawList draw_list = {0};
     ui_drawlist_begin(&draw_list, &app->frame_arena, 8192);
@@ -1551,6 +1262,11 @@ app_init(AppState *app, HINSTANCE instance)
     }
     debug_log_wide(L"renderer initialized");
 
+    if (!icon_worker_init(&app->icon_worker)) {
+        debug_log_wide(L"icon_worker_init failed");
+        return false;
+    }
+
     wchar_t font_path[MAX_PATH];
     _snwprintf_s(font_path, array_count(font_path), _TRUNCATE, L"%ls\\Fonts\\CascadiaMono.ttf", _wgetenv(L"WINDIR"));
     if (!kb_text_init(&app->text, font_path, 24.0f)) {
@@ -1602,9 +1318,12 @@ wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_line, int sh
         fatal_message(L"Failed to initialize COM.");
     }
 
-    AppState app;
-    g_app = &app;
-    if (!app_init(&app, instance)) {
+    AppState *app = (AppState *)heap_alloc_zero(sizeof(AppState));
+    if (!app) {
+        fatal_message(L"Failed to allocate app state.");
+    }
+    g_app = app;
+    if (!app_init(app, instance)) {
         fatal_message(L"Failed to initialize launcher.");
     }
 
@@ -1614,7 +1333,9 @@ wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_line, int sh
         DispatchMessageW(&msg);
     }
 
-    app_shutdown(&app);
+    app_shutdown(app);
+    heap_free(app);
+    g_app = NULL;
     CoUninitialize();
     return 0;
 }
