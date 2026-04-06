@@ -16,6 +16,7 @@ typedef enum UiDrawCmdType {
     UiDrawCmdType_Text = 1,
     UiDrawCmdType_ClipPush = 2,
     UiDrawCmdType_ClipPop = 3,
+    UiDrawCmdType_Image = 4,
 } UiDrawCmdType;
 
 typedef struct UiDrawCmdRect {
@@ -36,12 +37,19 @@ typedef struct UiDrawCmdClip {
     UiRect rect;
 } UiDrawCmdClip;
 
+typedef struct UiDrawCmdImage {
+    UiRect rect;
+    void *texture_srv;
+    RenderColor tint;
+} UiDrawCmdImage;
+
 typedef struct UiDrawCmd {
     UiDrawCmdType type;
     union {
         UiDrawCmdRect rect;
         UiDrawCmdText text;
         UiDrawCmdClip clip;
+        UiDrawCmdImage image;
     };
 } UiDrawCmd;
 
@@ -114,6 +122,7 @@ bool ui_draw_rect(UiDrawList *list, UiRect rect, RenderColor color);
 bool ui_draw_text(UiDrawList *list, f32 x, f32 baseline_y, const char *text, RenderColor color);
 bool ui_draw_text_font(UiDrawList *list, f32 x, f32 baseline_y, const char *text, RenderColor color, struct KbTextSystem *font);
 bool ui_draw_text_clamped(UiDrawList *list, f32 x, f32 baseline_y, const char *text, RenderColor color, f32 max_width);
+bool ui_draw_image(UiDrawList *list, UiRect rect, void *texture_srv, RenderColor tint);
 
 UiRect ui_rect(f32 x, f32 y, f32 w, f32 h);
 UiRect ui_inset(UiRect rect, f32 inset_left, f32 inset_top, f32 inset_right, f32 inset_bottom);

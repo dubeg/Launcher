@@ -23,6 +23,24 @@
 #define LAUNCHER_DEFAULT_VISIBLE_ROWS 10
 #define LAUNCHER_MIN_VISIBLE_ROWS 1
 #define LAUNCHER_MAX_VISIBLE_ROWS 50
+#define LAUNCHER_ICON_SIZE_PX 20
+#define LAUNCHER_ICON_CACHE_CAPACITY 512
+#define LAUNCHER_ICON_QUEUE_CAPACITY 1024
+
+typedef enum AppIconState {
+    AppIconState_Missing = 0,
+    AppIconState_Queued = 1,
+    AppIconState_Ready = 2,
+    AppIconState_Failed = 3,
+} AppIconState;
+
+typedef struct AppIconEntry {
+    wchar_t *path;
+    s32 icon_index;
+    AppIconState state;
+    Dx11Texture texture;
+    u32 last_used_frame;
+} AppIconEntry;
 
 typedef struct AppState {
     HWND hwnd;
@@ -49,6 +67,12 @@ typedef struct AppState {
     bool caret_blink_on;
     wchar_t install_dir[MAX_PATH * 4];
     char query[LAUNCHER_MAX_QUERY];
+    AppIconEntry icon_cache[LAUNCHER_ICON_CACHE_CAPACITY];
+    s32 icon_cache_count;
+    s32 icon_queue[LAUNCHER_ICON_QUEUE_CAPACITY];
+    s32 icon_queue_read;
+    s32 icon_queue_write;
+    u32 frame_counter;
 } AppState;
 
 static AppState *g_app = NULL;
@@ -60,6 +84,13 @@ static f32 app_measure_text_width(AppState *app, KbTextSystem *font, const char 
 static void app_clamp_result_view(AppState *app);
 static void app_clamp_results_top_bounds(AppState *app);
 static void app_window_size_for_rows(AppState *app, s32 *out_width, s32 *out_height);
+static s32 app_find_icon_entry(AppState *app, const wchar_t *path, s32 icon_index);
+static s32 app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 icon_index);
+static void app_icon_queue_push(AppState *app, s32 entry_index);
+static void app_request_item_icon(AppState *app, const LaunchItem *item);
+static bool app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride);
+static void app_process_icon_queue(AppState *app, s32 budget);
+static void app_shutdown_icon_cache(AppState *app);
 
 static s32
 app_clamp_query_index(AppState *app, s32 index)
@@ -508,6 +539,214 @@ app_measure_text_width(AppState *app, KbTextSystem *font, const char *text)
     return shaped.width;
 }
 
+static s32
+app_find_icon_entry(AppState *app, const wchar_t *path, s32 icon_index)
+{
+    if (!app || !path || !path[0]) {
+        return -1;
+    }
+    for (s32 i = 0; i < app->icon_cache_count; ++i) {
+        AppIconEntry *entry = &app->icon_cache[i];
+        if (entry->icon_index == icon_index && entry->path && _wcsicmp(entry->path, path) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static s32
+app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 icon_index)
+{
+    s32 found = app_find_icon_entry(app, path, icon_index);
+    if (found >= 0) {
+        return found;
+    }
+
+    if (app->icon_cache_count < LAUNCHER_ICON_CACHE_CAPACITY) {
+        s32 idx = app->icon_cache_count++;
+        AppIconEntry *entry = &app->icon_cache[idx];
+        ZeroMemory(entry, sizeof(*entry));
+        entry->path = arena_wcsdup(&app->permanent_arena, path);
+        entry->icon_index = icon_index;
+        entry->state = AppIconState_Missing;
+        return idx;
+    }
+
+    s32 replace = 0;
+    u32 oldest = 0xffffffffu;
+    for (s32 i = 0; i < app->icon_cache_count; ++i) {
+        if (app->icon_cache[i].last_used_frame < oldest) {
+            oldest = app->icon_cache[i].last_used_frame;
+            replace = i;
+        }
+    }
+    AppIconEntry *entry = &app->icon_cache[replace];
+    dx11_renderer_destroy_texture(&entry->texture);
+    entry->path = arena_wcsdup(&app->permanent_arena, path);
+    entry->icon_index = icon_index;
+    entry->state = AppIconState_Missing;
+    entry->last_used_frame = app->frame_counter;
+    return replace;
+}
+
+static void
+app_icon_queue_push(AppState *app, s32 entry_index)
+{
+    s32 next_write = (app->icon_queue_write + 1) % LAUNCHER_ICON_QUEUE_CAPACITY;
+    if (next_write == app->icon_queue_read) {
+        return;
+    }
+    app->icon_queue[app->icon_queue_write] = entry_index;
+    app->icon_queue_write = next_write;
+}
+
+static bool
+app_extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_stride)
+{
+    if (!path || !path[0] || !out_pixels || !out_stride || icon_size <= 0) {
+        return false;
+    }
+
+    SHFILEINFOW info;
+    ZeroMemory(&info, sizeof(info));
+    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
+    if (icon_index >= 0) {
+        flags |= SHGFI_SYSICONINDEX;
+    }
+    if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
+        ZeroMemory(&info, sizeof(info));
+        flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES;
+        if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
+            return false;
+        }
+    }
+    if (!info.hIcon) {
+        return false;
+    }
+
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = icon_size;
+    bmi.bmiHeader.biHeight = -icon_size;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hdc = CreateCompatibleDC(NULL);
+    if (!hdc) {
+        DestroyIcon(info.hIcon);
+        return false;
+    }
+
+    void *dib_pixels = NULL;
+    HBITMAP dib = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &dib_pixels, NULL, 0);
+    if (!dib || !dib_pixels) {
+        DeleteDC(hdc);
+        DestroyIcon(info.hIcon);
+        return false;
+    }
+
+    HGDIOBJ old_obj = SelectObject(hdc, dib);
+    PatBlt(hdc, 0, 0, icon_size, icon_size, BLACKNESS);
+    DrawIconEx(hdc, 0, 0, info.hIcon, icon_size, icon_size, 0, NULL, DI_NORMAL);
+
+    s32 stride = icon_size * 4;
+    u8 *pixels = (u8 *)heap_alloc_zero((size_t)stride * (size_t)icon_size);
+    if (pixels) {
+        const u8 *src = (const u8 *)dib_pixels;
+        for (s32 y = 0; y < icon_size; ++y) {
+            for (s32 x = 0; x < icon_size; ++x) {
+                size_t p = (size_t)(y * stride + x * 4);
+                u8 b = src[p + 0];
+                u8 g = src[p + 1];
+                u8 r = src[p + 2];
+                u8 a = src[p + 3];
+                pixels[p + 0] = r;
+                pixels[p + 1] = g;
+                pixels[p + 2] = b;
+                pixels[p + 3] = a;
+            }
+        }
+        *out_pixels = pixels;
+        *out_stride = stride;
+    }
+
+    SelectObject(hdc, old_obj);
+    DeleteObject(dib);
+    DeleteDC(hdc);
+    DestroyIcon(info.hIcon);
+    return pixels != NULL;
+}
+
+static void
+app_request_item_icon(AppState *app, const LaunchItem *item)
+{
+    if (!app || !item) {
+        return;
+    }
+    const wchar_t *path = item->icon_path ? item->icon_path : item->launch_path;
+    if (!path || !path[0]) {
+        return;
+    }
+    s32 icon_index = item->icon_index;
+    s32 idx = app_get_or_create_icon_entry(app, path, icon_index);
+    if (idx < 0) {
+        return;
+    }
+    AppIconEntry *entry = &app->icon_cache[idx];
+    entry->last_used_frame = app->frame_counter;
+    if (entry->state == AppIconState_Missing) {
+        entry->state = AppIconState_Queued;
+        app_icon_queue_push(app, idx);
+    }
+}
+
+static void
+app_process_icon_queue(AppState *app, s32 budget)
+{
+    if (!app || budget <= 0) {
+        return;
+    }
+    while (budget-- > 0 && app->icon_queue_read != app->icon_queue_write) {
+        s32 idx = app->icon_queue[app->icon_queue_read];
+        app->icon_queue_read = (app->icon_queue_read + 1) % LAUNCHER_ICON_QUEUE_CAPACITY;
+        if (idx < 0 || idx >= app->icon_cache_count) {
+            continue;
+        }
+        AppIconEntry *entry = &app->icon_cache[idx];
+        if (entry->state != AppIconState_Queued || !entry->path) {
+            continue;
+        }
+        u8 *pixels = NULL;
+        s32 stride = 0;
+        if (!app_extract_shell_icon_rgba(entry->path, entry->icon_index, LAUNCHER_ICON_SIZE_PX, &pixels, &stride)) {
+            entry->state = AppIconState_Failed;
+            continue;
+        }
+        (void)stride;
+        dx11_renderer_destroy_texture(&entry->texture);
+        if (dx11_renderer_create_texture_rgba(&app->renderer, LAUNCHER_ICON_SIZE_PX, LAUNCHER_ICON_SIZE_PX, pixels, &entry->texture)) {
+            entry->state = AppIconState_Ready;
+        } else {
+            entry->state = AppIconState_Failed;
+        }
+        heap_free(pixels);
+    }
+}
+
+static void
+app_shutdown_icon_cache(AppState *app)
+{
+    if (!app) {
+        return;
+    }
+    for (s32 i = 0; i < app->icon_cache_count; ++i) {
+        dx11_renderer_destroy_texture(&app->icon_cache[i].texture);
+    }
+    app->icon_cache_count = 0;
+}
+
 static void
 draw_text_line_clamped_font(AppState *app, KbTextSystem *font, f32 x, f32 baseline_y, const char *text, RenderColor color, f32 max_width)
 {
@@ -622,6 +861,20 @@ app_flush_ui_draw_list(AppState *app, UiDrawList *draw_list, u32 win_w, u32 win_
             } else {
                 draw_text_line_font(app, font, &app->frame_arena, cmd->text.x, cmd->text.baseline_y, cmd->text.text, cmd->text.color);
             }
+            continue;
+        }
+        if (cmd->type == UiDrawCmdType_Image) {
+            ID3D11ShaderResourceView *want_srv = (ID3D11ShaderResourceView *)cmd->image.texture_srv;
+            if (app->renderer.vertex_count > 0 && app->renderer.pending_text_srv != want_srv) {
+                dx11_renderer_flush(&app->renderer);
+            }
+            app->renderer.pending_text_srv = want_srv;
+            dx11_renderer_draw_image(&app->renderer,
+                                     cmd->image.rect.x,
+                                     cmd->image.rect.y,
+                                     cmd->image.rect.w,
+                                     cmd->image.rect.h,
+                                     cmd->image.tint);
         }
     }
 }
@@ -726,6 +979,8 @@ app_render(AppState *app)
     u32 height = (u32)(rect.bottom - rect.top);
 
     arena_reset(&app->frame_arena);
+    app->frame_counter += 1;
+    app_process_icon_queue(app, 2);
     dx11_renderer_begin(&app->renderer, (RenderColor){0.06f, 0.07f, 0.09f, 1.0f});
     UiDrawList draw_list = {0};
     ui_drawlist_begin(&draw_list, &app->frame_arena, 8192);
@@ -798,7 +1053,9 @@ app_render(AppState *app)
     f32 scrollbar_reserved_w = show_scrollbar ? (scrollbar_track_w + scrollbar_inset * 2.0f) : 0.0f;
     f32 row_x = list_content_rect.x;
     f32 content_right = list_content_rect.x + list_content_rect.w - scrollbar_reserved_w;
-    f32 item_text_x = row_x + 12.0f;
+    const f32 icon_size = (f32)LAUNCHER_ICON_SIZE_PX;
+    const f32 icon_gap = 8.0f;
+    f32 item_text_x = row_x + 12.0f + icon_size + icon_gap;
     f32 list_clip_w = content_right - list_content_rect.x;
     if (list_clip_w < 0.0f) {
         list_clip_w = 0.0f;
@@ -824,6 +1081,19 @@ app_render(AppState *app)
         ui_control_results_row(&draw_list, ui_rect(row_x, row_top, content_right - row_x, list_control.row_height), selected, theme.row_selected_bg);
 
         const LaunchItem *item = app->results.items[(u32)i].item;
+        app_request_item_icon(app, item);
+        const wchar_t *icon_path = item->icon_path ? item->icon_path : item->launch_path;
+        s32 icon_entry_idx = app_find_icon_entry(app, icon_path, item->icon_index);
+        f32 icon_x = row_x + 12.0f;
+        f32 icon_y = row_top + (row_height - icon_size) * 0.5f;
+        if (icon_entry_idx >= 0 && app->icon_cache[icon_entry_idx].state == AppIconState_Ready && app->icon_cache[icon_entry_idx].texture.srv) {
+            ui_draw_image(&draw_list,
+                          ui_rect(icon_x, icon_y, icon_size, icon_size),
+                          (void *)app->icon_cache[icon_entry_idx].texture.srv,
+                          (RenderColor){1.0f, 1.0f, 1.0f, 1.0f});
+        } else {
+            ui_draw_rect(&draw_list, ui_rect(icon_x, icon_y, icon_size, icon_size), (RenderColor){0.20f, 0.24f, 0.30f, 0.8f});
+        }
         f32 title_baseline = row_top + app->text_results.pixel_height + 2.0f;
         f32 subtitle_baseline = title_baseline + app->text_results.line_height;
         ui_draw_text_font(&draw_list, item_text_x, title_baseline, item->display_name, theme.fg_primary, &app->text_results);
@@ -1098,6 +1368,7 @@ static void
 app_shutdown(AppState *app)
 {
     UnregisterHotKey(app->hwnd, LAUNCHER_HOTKEY_ID);
+    app_shutdown_icon_cache(app);
     kb_text_shutdown(&app->text_results);
     kb_text_shutdown(&app->text);
     dx11_renderer_shutdown(&app->renderer);

@@ -22,6 +22,13 @@ typedef struct RendererVertex {
     f32 a;
 } RendererVertex;
 
+typedef struct Dx11Texture {
+    struct ID3D11Texture2D *texture;
+    struct ID3D11ShaderResourceView *srv;
+    u32 width;
+    u32 height;
+} Dx11Texture;
+
 typedef struct Dx11Renderer {
     HWND hwnd;
     u32 width;
@@ -61,7 +68,10 @@ void dx11_renderer_set_scissor_u32(Dx11Renderer *renderer, u32 left, u32 top, u3
 void dx11_renderer_flush(Dx11Renderer *renderer);
 void dx11_renderer_draw_rect(Dx11Renderer *renderer, f32 x, f32 y, f32 w, f32 h, RenderColor color);
 void dx11_renderer_draw_text(Dx11Renderer *renderer, const ShapedText *text, RenderColor color);
+void dx11_renderer_draw_image(Dx11Renderer *renderer, f32 x, f32 y, f32 w, f32 h, RenderColor color);
 void dx11_renderer_upload_atlas(Dx11Renderer *renderer, const FontRaster *raster, u32 atlas_index);
+bool dx11_renderer_create_texture_rgba(Dx11Renderer *renderer, s32 width, s32 height, const void *pixels, Dx11Texture *out_texture);
+void dx11_renderer_destroy_texture(Dx11Texture *texture);
 void dx11_renderer_end(Dx11Renderer *renderer);
 
 #endif

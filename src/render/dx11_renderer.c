@@ -360,6 +360,42 @@ dx11_renderer_draw_text(Dx11Renderer *renderer, const ShapedText *text, RenderCo
 }
 
 void
+dx11_renderer_draw_image(Dx11Renderer *renderer, f32 x, f32 y, f32 w, f32 h, RenderColor color)
+{
+    push_quad(renderer, x, y, x + w, y + h, 0.0f, 0.0f, 1.0f, 1.0f, color);
+}
+
+bool
+dx11_renderer_create_texture_rgba(Dx11Renderer *renderer, s32 width, s32 height, const void *pixels, Dx11Texture *out_texture)
+{
+    if (!renderer || !out_texture || width <= 0 || height <= 0 || !pixels) {
+        return false;
+    }
+    ID3D11Texture2D *texture = NULL;
+    ID3D11ShaderResourceView *srv = NULL;
+    if (!create_texture_rgba(renderer->device, width, height, pixels, &texture, &srv)) {
+        return false;
+    }
+    out_texture->texture = texture;
+    out_texture->srv = srv;
+    out_texture->width = (u32)width;
+    out_texture->height = (u32)height;
+    return true;
+}
+
+void
+dx11_renderer_destroy_texture(Dx11Texture *texture)
+{
+    if (!texture) {
+        return;
+    }
+    safe_release((IUnknown **)&texture->srv);
+    safe_release((IUnknown **)&texture->texture);
+    texture->width = 0;
+    texture->height = 0;
+}
+
+void
 dx11_renderer_upload_atlas(Dx11Renderer *renderer, const FontRaster *raster, u32 atlas_index)
 {
     if (!raster->atlas_pixels) {

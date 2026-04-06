@@ -29,6 +29,8 @@ typedef struct LaunchItem {
     char *subtitle;
     wchar_t *launch_path;
     wchar_t *arguments;
+    wchar_t *icon_path;
+    s32 icon_index;
 } LaunchItem;
 
 typedef struct LaunchItemArray {

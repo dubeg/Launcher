@@ -84,6 +84,20 @@ ui_draw_text_clamped(UiDrawList *list, f32 x, f32 baseline_y, const char *text, 
     return true;
 }
 
+bool
+ui_draw_image(UiDrawList *list, UiRect rect, void *texture_srv, RenderColor tint)
+{
+    if (!list || list->count >= list->capacity || !texture_srv) {
+        return false;
+    }
+    UiDrawCmd *cmd = &list->commands[list->count++];
+    cmd->type = UiDrawCmdType_Image;
+    cmd->image.rect = rect;
+    cmd->image.texture_srv = texture_srv;
+    cmd->image.tint = tint;
+    return true;
+}
+
 UiRect
 ui_rect(f32 x, f32 y, f32 w, f32 h)
 {
