@@ -1,0 +1,67 @@
+#ifndef LAUNCHER_DX11_RENDERER_H
+#define LAUNCHER_DX11_RENDERER_H
+
+#include "../core/base.h"
+#include "../text/kb_text.h"
+
+typedef struct RenderColor {
+    f32 r;
+    f32 g;
+    f32 b;
+    f32 a;
+} RenderColor;
+
+typedef struct RendererVertex {
+    f32 x;
+    f32 y;
+    f32 u;
+    f32 v;
+    f32 r;
+    f32 g;
+    f32 b;
+    f32 a;
+} RendererVertex;
+
+typedef struct Dx11Renderer {
+    HWND hwnd;
+    u32 width;
+    u32 height;
+    struct IDXGISwapChain *swap_chain;
+    struct ID3D11Device *device;
+    struct ID3D11DeviceContext *context;
+    struct ID3D11RenderTargetView *rtv;
+    struct ID3D11BlendState *blend_state;
+    struct ID3D11SamplerState *sampler;
+    struct ID3D11RasterizerState *rasterizer;
+    struct ID3D11VertexShader *vertex_shader;
+    struct ID3D11PixelShader *pixel_shader;
+    struct ID3D11InputLayout *input_layout;
+    struct ID3D11Buffer *vertex_buffer;
+    struct ID3D11Texture2D *atlas_texture;
+    struct ID3D11ShaderResourceView *atlas_srv;
+    struct ID3D11Texture2D *atlas_texture_b;
+    struct ID3D11ShaderResourceView *atlas_srv_b;
+    struct ID3D11ShaderResourceView *pending_text_srv;
+    struct ID3D11Texture2D *white_texture;
+    struct ID3D11ShaderResourceView *white_srv;
+    RendererVertex *vertices;
+    u32 vertex_count;
+    u32 vertex_capacity;
+    u32 scissor_left;
+    u32 scissor_top;
+    u32 scissor_right;
+    u32 scissor_bottom;
+} Dx11Renderer;
+
+bool dx11_renderer_init(Dx11Renderer *renderer, HWND hwnd, u32 width, u32 height);
+void dx11_renderer_shutdown(Dx11Renderer *renderer);
+void dx11_renderer_resize(Dx11Renderer *renderer, u32 width, u32 height);
+void dx11_renderer_begin(Dx11Renderer *renderer, RenderColor clear_color);
+void dx11_renderer_set_scissor_u32(Dx11Renderer *renderer, u32 left, u32 top, u32 right, u32 bottom);
+void dx11_renderer_flush(Dx11Renderer *renderer);
+void dx11_renderer_draw_rect(Dx11Renderer *renderer, f32 x, f32 y, f32 w, f32 h, RenderColor color);
+void dx11_renderer_draw_text(Dx11Renderer *renderer, const ShapedText *text, RenderColor color);
+void dx11_renderer_upload_atlas(Dx11Renderer *renderer, const FontRaster *raster, u32 atlas_index);
+void dx11_renderer_end(Dx11Renderer *renderer);
+
+#endif

@@ -1,0 +1,140 @@
+#include "start_menu_scan.h"
+
+#include "../core/base.h"
+
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <shlwapi.h>
+#include <stdio.h>
+#include <string.h>
+
+#pragma comment(lib, "shlwapi.lib")
+
+typedef struct TempItemList {
+    LaunchItem *items;
+    u32 count;
+    u32 capacity;
+} TempItemList;
+
+static void
+push_temp_item(TempItemList *list, const LaunchItem *item)
+{
+    if (list->count >= list->capacity) {
+        u32 new_capacity = list->capacity ? list->capacity * 2 : 128;
+        list->items = (LaunchItem *)heap_realloc(list->items, sizeof(LaunchItem) * new_capacity);
+        list->capacity = new_capacity;
+    }
+    list->items[list->count++] = *item;
+}
+
+static bool
+resolve_shortcut(const wchar_t *shortcut_path, wchar_t *target, size_t target_count, wchar_t *args, size_t args_count)
+{
+    IShellLinkW *shell_link = NULL;
+    IPersistFile *persist = NULL;
+    bool ok = false;
+
+    if (FAILED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&shell_link))) {
+        return false;
+    }
+    if (FAILED(IShellLinkW_QueryInterface(shell_link, &IID_IPersistFile, (void **)&persist))) {
+        IShellLinkW_Release(shell_link);
+        return false;
+    }
+    if (SUCCEEDED(IPersistFile_Load(persist, shortcut_path, STGM_READ)) &&
+        SUCCEEDED(IShellLinkW_GetPath(shell_link, target, (int)target_count, NULL, SLGP_RAWPATH))) {
+        IShellLinkW_GetArguments(shell_link, args, (int)args_count);
+        ok = target[0] != 0;
+    }
+
+    IPersistFile_Release(persist);
+    IShellLinkW_Release(shell_link);
+    return ok;
+}
+
+static void
+append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
+{
+    wchar_t target[MAX_PATH * 4] = {0};
+    wchar_t arguments[512] = {0};
+    if (!resolve_shortcut(shortcut_path, target, array_count(target), arguments, array_count(arguments))) {
+        return;
+    }
+
+    char *display_name_utf8 = wide_path_filename_utf8(arena, shortcut_path);
+    char *target_utf8 = utf8_from_wide(arena, target);
+    char *search_text = arena_strdup(arena, display_name_utf8);
+    char *dot = strrchr(search_text, '.');
+    if (dot) {
+        *dot = 0;
+    }
+
+    size_t search_size = strlen(search_text) + 1 + strlen(path_filename_utf8(target_utf8)) + 1;
+    char *combined = (char *)arena_push_zero(arena, search_size, 1);
+    _snprintf_s(combined, search_size, _TRUNCATE, "%s %s", search_text, path_filename_utf8(target_utf8));
+    lowercase_ascii_in_place(combined);
+
+    LaunchItem item = {0};
+    item.mode = SearchMode_Apps;
+    item.source = LaunchSource_StartMenu;
+    item.display_name = arena_strdup(arena, search_text);
+    item.search_text = arena_strdup(arena, combined);
+    item.subtitle = arena_strdup(arena, target_utf8);
+    item.launch_path = arena_wcsdup(arena, target);
+    item.arguments = arguments[0] ? arena_wcsdup(arena, arguments) : NULL;
+    push_temp_item(list, &item);
+}
+
+static void
+scan_directory_recursive(Arena *arena, TempItemList *list, const wchar_t *directory)
+{
+    wchar_t pattern[MAX_PATH * 4];
+    _snwprintf_s(pattern, array_count(pattern), _TRUNCATE, L"%ls\\*", directory);
+
+    WIN32_FIND_DATAW find_data;
+    HANDLE find = FindFirstFileW(pattern, &find_data);
+    if (find == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    do {
+        if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) {
+            continue;
+        }
+
+        wchar_t full_path[MAX_PATH * 4];
+        _snwprintf_s(full_path, array_count(full_path), _TRUNCATE, L"%ls\\%ls", directory, find_data.cFileName);
+
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            scan_directory_recursive(arena, list, full_path);
+        } else if (_wcsicmp(PathFindExtensionW(find_data.cFileName), L".lnk") == 0) {
+            append_shortcut(arena, list, full_path);
+        }
+    } while (FindNextFileW(find, &find_data));
+
+    FindClose(find);
+}
+
+static void
+scan_known_folder(Arena *arena, TempItemList *list, const GUID *folder_id)
+{
+    PWSTR path = NULL;
+    if (SUCCEEDED(SHGetKnownFolderPath(folder_id, 0, NULL, &path))) {
+        scan_directory_recursive(arena, list, path);
+        CoTaskMemFree(path);
+    }
+}
+
+bool
+start_menu_scan_build(Arena *arena, LaunchItemArray *out_items)
+{
+    TempItemList temp = {0};
+    scan_known_folder(arena, &temp, &FOLDERID_Programs);
+    scan_known_folder(arena, &temp, &FOLDERID_CommonPrograms);
+
+    out_items->count = temp.count;
+    out_items->items = (LaunchItem *)arena_push(arena, sizeof(LaunchItem) * temp.count, sizeof(void *));
+    memcpy(out_items->items, temp.items, sizeof(LaunchItem) * temp.count);
+    heap_free(temp.items);
+    return true;
+}

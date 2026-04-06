@@ -1,0 +1,12 @@
+{
+  "cmd.exe": "Command Prompt",
+  "powershell.exe": "Windows PowerShell",
+  "pwsh.exe": "PowerShell 7",
+  "notepad.exe": "Notepad",
+  "calc.exe": "Calculator",
+  "mspaint.exe": "Paint",
+  "control.exe": "Control Panel",
+  "explorer.exe": "File Explorer",
+  "regedit.exe": "Registry Editor",
+  "services.msc.exe": "Services"
+}
