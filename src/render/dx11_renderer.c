@@ -264,6 +264,7 @@ dx11_renderer_init(Dx11Renderer *renderer, HWND hwnd, u32 width, u32 height)
 
     renderer->vertices = (RendererVertex *)heap_alloc_zero(sizeof(RendererVertex) * 4096);
     renderer->vertex_capacity = 4096;
+    renderer->text_snap_pixels = true;
     return true;
 }
 
@@ -371,10 +372,32 @@ dx11_renderer_draw_text(Dx11Renderer *renderer, const ShapedText *text, RenderCo
         const TextQuad *quad = &text->quads[i];
         f32 w = quad->x1 - quad->x0;
         f32 h = quad->y1 - quad->y0;
-        f32 x0 = snap_pixel(quad->x0);
-        f32 y0 = snap_pixel(quad->y0);
+        f32 x0 = quad->x0;
+        f32 y0 = quad->y0;
+        if (renderer->text_snap_pixels) {
+            x0 = snap_pixel(quad->x0);
+            y0 = snap_pixel(quad->y0);
+        }
         push_quad(renderer, x0, y0, x0 + w, y0 + h, quad->u0, quad->v0, quad->u1, quad->v1, color);
     }
+}
+
+void
+dx11_renderer_set_text_pixel_snap(Dx11Renderer *renderer, bool enabled)
+{
+    if (renderer) {
+        renderer->text_snap_pixels = enabled;
+    }
+}
+
+bool
+dx11_renderer_toggle_text_pixel_snap(Dx11Renderer *renderer)
+{
+    if (!renderer) {
+        return false;
+    }
+    renderer->text_snap_pixels = !renderer->text_snap_pixels;
+    return renderer->text_snap_pixels;
 }
 
 void

@@ -1,5 +1,7 @@
 #include "kb_text.h"
 
+#include <math.h>
+
 #define KB_TEXT_SHAPE_IMPLEMENTATION
 #include "../../third_party/kb/kb_text_shape.h"
 
@@ -99,4 +101,21 @@ kb_text_shape(Arena *arena, KbTextSystem *text, const char *utf8, f32 x, f32 bas
 
     shaped.width = cursor_x - x;
     return shaped;
+}
+
+void
+kb_text_snap_shaped_quads_to_pixels(ShapedText *shaped)
+{
+    if (!shaped || !shaped->quads) {
+        return;
+    }
+    for (u32 i = 0; i < shaped->count; ++i) {
+        TextQuad *q = &shaped->quads[i];
+        f32 w = q->x1 - q->x0;
+        f32 h = q->y1 - q->y0;
+        q->x0 = floorf(q->x0 + 0.5f);
+        q->y0 = floorf(q->y0 + 0.5f);
+        q->x1 = q->x0 + w;
+        q->y1 = q->y0 + h;
+    }
 }

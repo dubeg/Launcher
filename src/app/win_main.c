@@ -15,6 +15,7 @@
 #include <shellscalingapi.h>
 #include <shlwapi.h>
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -530,7 +531,17 @@ draw_text_line_font(AppState *app, KbTextSystem *font, Arena *frame, f32 x, f32 
     }
     app->renderer.pending_text_srv = (ID3D11ShaderResourceView *)want_srv;
 
-    ShapedText shaped = kb_text_shape(frame, font, text, x, baseline_y);
+    f32 shape_x = x;
+    f32 shape_y = baseline_y;
+    if (app->renderer.text_snap_pixels && font == &app->text_results) {
+        shape_x = floorf(x + 0.5f);
+        shape_y = floorf(baseline_y + 0.5f);
+    }
+
+    ShapedText shaped = kb_text_shape(frame, font, text, shape_x, shape_y);
+    if (app->renderer.text_snap_pixels && font == &app->text_results) {
+        kb_text_snap_shaped_quads_to_pixels(&shaped);
+    }
     dx11_renderer_draw_text(&app->renderer, &shaped, color);
 }
 
@@ -1255,6 +1266,10 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 break;
             case VK_RETURN: app_activate_selection(app); break;
             case VK_F5: app_init_catalog(app); app_refresh_results(app); break;
+            case VK_F6: {
+                bool snap_on = dx11_renderer_toggle_text_pixel_snap(&app->renderer);
+                debug_log_wide(L"Text pixel snap: %ls", snap_on ? L"on" : L"off");
+            } break;
             default: handled = false; break;
             }
             if (query_changed) {

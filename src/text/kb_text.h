@@ -36,5 +36,6 @@ typedef struct KbTextSystem {
 bool kb_text_init(KbTextSystem *text, const wchar_t *font_path, f32 pixel_height);
 void kb_text_shutdown(KbTextSystem *text);
 ShapedText kb_text_shape(Arena *arena, KbTextSystem *text, const char *utf8, f32 x, f32 baseline_y);
+void kb_text_snap_shaped_quads_to_pixels(ShapedText *shaped);
 
 #endif
