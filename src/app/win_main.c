@@ -1201,7 +1201,17 @@ app_refresh_results(AppState *app)
     } else {
         EverythingQueryResult query = everything_query_files(&app->results_arena, app->query, 128, &app->catalog_aliases);
         app->everything_available = query.available;
-        app->results = fuzzy_rank_items(&app->results_arena, lower_query, query.items.items, query.items.count, LAUNCHER_MAX_RESULTS);
+        /*
+         * Everything honors * and ? as globs; fuzzy_rank_items uses subsequence matching and
+         * treats those as literals, which filters out every path. Skip fuzzy when globs are used.
+         */
+        if (everything_query_has_glob_wildcards(app->query)) {
+            app->results =
+                fuzzy_pass_through_items(&app->results_arena, query.items.items, query.items.count, LAUNCHER_MAX_RESULTS);
+        } else {
+            app->results = fuzzy_rank_items(&app->results_arena, lower_query, query.items.items, query.items.count,
+                                            LAUNCHER_MAX_RESULTS);
+        }
     }
 
     if (app->results.count == 0) {

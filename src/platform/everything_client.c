@@ -13,6 +13,20 @@ build_query_wide(Arena *arena, const char *query_utf8)
     return wide;
 }
 
+bool
+everything_query_has_glob_wildcards(const char *query_utf8)
+{
+    if (!query_utf8) {
+        return false;
+    }
+    for (const char *p = query_utf8; *p; ++p) {
+        if (*p == '*' || *p == '?') {
+            return true;
+        }
+    }
+    return false;
+}
+
 EverythingQueryResult
 everything_query_files(Arena *arena, const char *query_utf8, u32 max_results, const CatalogAliases *aliases)
 {

@@ -93,3 +93,23 @@ fuzzy_rank_items(Arena *arena, const char *query, const LaunchItem *items, u32 i
     results.count = count;
     return results;
 }
+
+SearchResultArray
+fuzzy_pass_through_items(Arena *arena, const LaunchItem *items, u32 item_count, u32 max_results)
+{
+    SearchResultArray results = {0};
+    if (!arena || !items || item_count == 0 || max_results == 0) {
+        return results;
+    }
+    u32 n = item_count;
+    if (n > max_results) {
+        n = max_results;
+    }
+    results.items = (SearchResult *)arena_push_zero(arena, sizeof(SearchResult) * n, sizeof(void *));
+    results.count = n;
+    for (u32 i = 0; i < n; ++i) {
+        results.items[i].item = &items[i];
+        results.items[i].score = 0.0;
+    }
+    return results;
+}
