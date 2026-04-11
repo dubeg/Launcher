@@ -10,6 +10,7 @@
 #include "../search/fuzzy.h"
 #include "../text/kb_text.h"
 #include "../ui/ui.h"
+#include "../ui/ctx_menu_icons.h"
 
 #include <d3d11.h>
 #include <shellapi.h>
@@ -25,6 +26,8 @@
 #pragma comment(lib, "Shcore.lib")
 
 #define LAUNCHER_RESULTS_FONT_PX 18.0f
+#define LAUNCHER_QUERY_FONT_PX 20.0f
+#define LAUNCHER_CTX_MENU_FONT_PX 14.5f
 #define LAUNCHER_UI_FONT_PX 24.0f
 #define LAUNCHER_BASE_WINDOW_W 920
 #define LAUNCHER_BASE_WINDOW_H 560
@@ -34,6 +37,7 @@
 #define LAUNCHER_ICON_SIZE_PX 24
 #define LAUNCHER_ICON_CACHE_CAPACITY 512
 #define LAUNCHER_ICON_QUEUE_CAPACITY 1024
+#define LAUNCHER_CTX_FILTER_CAP 128
 
 static const f32 k_debug_text_gamma_presets[] = {
     1.0f,
@@ -79,6 +83,15 @@ typedef struct AppIconEntry {
     u32 last_used_frame;
 } AppIconEntry;
 
+typedef struct AppListGeometry {
+    UiRect list_content_rect;
+    f32 row_step;
+    f32 first_row_y;
+    f32 content_right;
+    s32 start_index;
+    s32 rows_per_page;
+} AppListGeometry;
+
 typedef struct AppState {
     HWND hwnd;
     Arena permanent_arena;
@@ -88,6 +101,8 @@ typedef struct AppState {
     Dx11Renderer renderer;
     KbTextSystem text;
     KbTextSystem text_results;
+    KbTextSystem text_query;
+    KbTextSystem text_ctx_menu;
     LaunchItemArray app_catalog;
     CatalogAliases catalog_aliases;
     SearchResultArray results;
@@ -112,6 +127,24 @@ typedef struct AppState {
     u32 frame_counter;
     u32 dpi;
     f32 dpi_scale;
+    bool ctx_open;
+    s32 ctx_target_index;
+    f32 ctx_anchor_x;
+    f32 ctx_anchor_y;
+    char ctx_filter[LAUNCHER_CTX_FILTER_CAP];
+    s32 ctx_filter_len;
+    s32 ctx_filter_caret;
+    s32 ctx_filter_anchor;
+    f32 ctx_filter_scroll_x;
+    s32 ctx_selected;
+    s32 ctx_hover_row;
+    UiRect ctx_panel_rect;
+    UiRect ctx_filter_bar_rect;
+    UiRect ctx_filter_text_rect;
+    f32 ctx_list_row0_y;
+    f32 ctx_row_h;
+    s32 ctx_filtered_count;
+    Dx11Texture ctx_menu_icons[CTX_MENU_ICON_COUNT];
 } AppState;
 
 static AppState *g_app = NULL;
@@ -133,6 +166,7 @@ static u32 app_primary_monitor_dpi(void);
 static bool app_load_text_systems(AppState *app, const wchar_t *font_path);
 static void app_unload_text_systems(AppState *app);
 static void app_invalidate_icon_textures(AppState *app);
+static void app_hide(AppState *app);
 
 static s32
 app_clamp_query_index(AppState *app, s32 index)
@@ -445,6 +479,602 @@ app_query_cut_to_clipboard(AppState *app)
     return app_query_delete_selection(app);
 }
 
+typedef enum CtxAction {
+    CtxAction_Launch = 0,
+    CtxAction_CopyPath = 1,
+    CtxAction_OpenLocation = 2,
+} CtxAction;
+
+typedef struct CtxMenuPick {
+    u8 action;
+    double score;
+} CtxMenuPick;
+
+static const char *k_ctx_menu_labels[3] = {
+    "Launch",
+    "Copy path",
+    "Open file location",
+};
+
+static const char *k_ctx_menu_fuzzy[3] = {
+    "launch",
+    "copy path",
+    "open file location",
+};
+
+static int
+ctx_menu_pick_compare(const void *a, const void *b)
+{
+    const CtxMenuPick *x = (const CtxMenuPick *)a;
+    const CtxMenuPick *y = (const CtxMenuPick *)b;
+    if (x->score > y->score) {
+        return -1;
+    }
+    if (x->score < y->score) {
+        return 1;
+    }
+    return (int)x->action - (int)y->action;
+}
+
+static s32
+ctx_menu_build_picks(const char *filter_lower, CtxMenuPick *out)
+{
+    bool filtered = (filter_lower && filter_lower[0]);
+    s32 n = 0;
+    for (u32 i = 0; i < 3; ++i) {
+        if (filtered) {
+            FuzzyMatch m = fuzzy_score_text(filter_lower, k_ctx_menu_fuzzy[i]);
+            if (!m.matched) {
+                continue;
+            }
+            out[n].action = (u8)i;
+            out[n].score = m.score;
+        } else {
+            out[n].action = (u8)i;
+            out[n].score = 1.0 - (double)i * 0.001;
+        }
+        n++;
+    }
+    if (filtered && n > 1) {
+        qsort(out, (size_t)n, sizeof(CtxMenuPick), ctx_menu_pick_compare);
+    }
+    return n;
+}
+
+static void
+app_ctx_menu_close(AppState *app)
+{
+    if (!app) {
+        return;
+    }
+    app->ctx_open = false;
+    app->ctx_hover_row = -1;
+    app->ctx_filter[0] = 0;
+    app->ctx_filter_len = 0;
+    app->ctx_filter_caret = 0;
+    app->ctx_filter_anchor = 0;
+    app->ctx_filter_scroll_x = 0.0f;
+    app->ctx_filtered_count = 0;
+}
+
+static s32
+app_ctx_clamp_filter_index(AppState *app, s32 index)
+{
+    if (index < 0) {
+        return 0;
+    }
+    if (index > app->ctx_filter_len) {
+        return app->ctx_filter_len;
+    }
+    return index;
+}
+
+static bool
+app_ctx_filter_has_selection(AppState *app)
+{
+    return app->ctx_filter_anchor != app->ctx_filter_caret;
+}
+
+static void
+app_ctx_filter_selection_bounds(AppState *app, s32 *out_start, s32 *out_end)
+{
+    s32 a = app->ctx_filter_anchor;
+    s32 b = app->ctx_filter_caret;
+    if (a <= b) {
+        *out_start = a;
+        *out_end = b;
+    } else {
+        *out_start = b;
+        *out_end = a;
+    }
+}
+
+static void
+app_ctx_filter_set_caret(AppState *app, s32 new_caret, bool extend_selection)
+{
+    app->ctx_filter_caret = app_ctx_clamp_filter_index(app, new_caret);
+    if (!extend_selection) {
+        app->ctx_filter_anchor = app->ctx_filter_caret;
+    }
+    app->caret_blink_on = true;
+    app->caret_blink_tick_ms = GetTickCount();
+}
+
+static bool
+app_ctx_filter_delete_range(AppState *app, s32 start, s32 end)
+{
+    start = app_ctx_clamp_filter_index(app, start);
+    end = app_ctx_clamp_filter_index(app, end);
+    if (end <= start) {
+        return false;
+    }
+    memmove(app->ctx_filter + start, app->ctx_filter + end, (size_t)(app->ctx_filter_len - end + 1));
+    app->ctx_filter_len -= (end - start);
+    app->ctx_filter_caret = start;
+    app->ctx_filter_anchor = start;
+    app->caret_blink_on = true;
+    app->caret_blink_tick_ms = GetTickCount();
+    return true;
+}
+
+static bool
+app_ctx_filter_delete_selection(AppState *app)
+{
+    if (!app_ctx_filter_has_selection(app)) {
+        return false;
+    }
+    s32 start = 0;
+    s32 end = 0;
+    app_ctx_filter_selection_bounds(app, &start, &end);
+    return app_ctx_filter_delete_range(app, start, end);
+}
+
+static bool
+app_ctx_filter_insert_utf8(AppState *app, const char *utf8)
+{
+    if (!utf8) {
+        return false;
+    }
+    size_t ins_len = strlen(utf8);
+    if (ins_len == 0) {
+        return true;
+    }
+    if (app_ctx_filter_has_selection(app)) {
+        app_ctx_filter_delete_selection(app);
+    }
+    s32 room = LAUNCHER_CTX_FILTER_CAP - 1 - app->ctx_filter_len;
+    if (room <= 0) {
+        return false;
+    }
+    if ((s32)ins_len > room) {
+        ins_len = utf8_clamped_byte_len(utf8, (size_t)room);
+    }
+    if (ins_len == 0) {
+        return false;
+    }
+    memmove(app->ctx_filter + app->ctx_filter_caret + ins_len,
+            app->ctx_filter + app->ctx_filter_caret,
+            (size_t)(app->ctx_filter_len - app->ctx_filter_caret + 1));
+    memcpy(app->ctx_filter + app->ctx_filter_caret, utf8, ins_len);
+    app->ctx_filter_len += (s32)ins_len;
+    app->ctx_filter_caret += (s32)ins_len;
+    app->ctx_filter_anchor = app->ctx_filter_caret;
+    app->caret_blink_on = true;
+    app->caret_blink_tick_ms = GetTickCount();
+    return true;
+}
+
+static bool
+app_ctx_filter_insert_char(AppState *app, char c)
+{
+    if (app_ctx_filter_has_selection(app)) {
+        app_ctx_filter_delete_selection(app);
+    }
+    if (app->ctx_filter_len + 1 >= LAUNCHER_CTX_FILTER_CAP) {
+        return false;
+    }
+    memmove(app->ctx_filter + app->ctx_filter_caret + 1,
+            app->ctx_filter + app->ctx_filter_caret,
+            (size_t)(app->ctx_filter_len - app->ctx_filter_caret + 1));
+    app->ctx_filter[app->ctx_filter_caret] = c;
+    app->ctx_filter_len += 1;
+    app->ctx_filter_caret += 1;
+    app->ctx_filter_anchor = app->ctx_filter_caret;
+    app->caret_blink_on = true;
+    app->caret_blink_tick_ms = GetTickCount();
+    return true;
+}
+
+static s32
+app_ctx_filter_word_left(AppState *app, s32 from)
+{
+    s32 i = app_ctx_clamp_filter_index(app, from);
+    while (i > 0 && !app_query_is_word_char(app->ctx_filter[i - 1])) {
+        --i;
+    }
+    while (i > 0 && app_query_is_word_char(app->ctx_filter[i - 1])) {
+        --i;
+    }
+    return i;
+}
+
+static s32
+app_ctx_filter_word_right(AppState *app, s32 from)
+{
+    s32 i = app_ctx_clamp_filter_index(app, from);
+    while (i < app->ctx_filter_len && !app_query_is_word_char(app->ctx_filter[i])) {
+        ++i;
+    }
+    while (i < app->ctx_filter_len && app_query_is_word_char(app->ctx_filter[i])) {
+        ++i;
+    }
+    return i;
+}
+
+static bool
+app_ctx_filter_paste_from_clipboard(AppState *app)
+{
+    const char *text = NULL;
+    if (!app_clipboard_get_utf8(app->hwnd, &app->frame_arena, &text)) {
+        return false;
+    }
+    if (!text) {
+        return true;
+    }
+    return app_ctx_filter_insert_utf8(app, text);
+}
+
+static bool
+app_ctx_filter_copy_to_clipboard(AppState *app)
+{
+    if (!app_ctx_filter_has_selection(app)) {
+        return false;
+    }
+    s32 start = 0;
+    s32 end = 0;
+    app_ctx_filter_selection_bounds(app, &start, &end);
+    return app_clipboard_set_utf8(app->hwnd, app->ctx_filter + start, end - start);
+}
+
+static bool
+app_ctx_filter_cut_to_clipboard(AppState *app)
+{
+    if (!app_ctx_filter_has_selection(app)) {
+        return false;
+    }
+    s32 start = 0;
+    s32 end = 0;
+    app_ctx_filter_selection_bounds(app, &start, &end);
+    if (!app_clipboard_set_utf8(app->hwnd, app->ctx_filter + start, end - start)) {
+        return false;
+    }
+    return app_ctx_filter_delete_selection(app);
+}
+
+static void
+app_ctx_clamp_menu_selection(AppState *app, s32 filtered_count)
+{
+    if (filtered_count <= 0) {
+        app->ctx_selected = 0;
+        return;
+    }
+    if (app->ctx_selected < 0) {
+        app->ctx_selected = 0;
+    }
+    if (app->ctx_selected >= filtered_count) {
+        app->ctx_selected = filtered_count - 1;
+    }
+}
+
+static s32
+app_ctx_rebuild_picks(AppState *app, CtxMenuPick *picks)
+{
+    char lower[LAUNCHER_CTX_FILTER_CAP];
+    strcpy_s(lower, sizeof(lower), app->ctx_filter);
+    lowercase_ascii_in_place(lower);
+    return ctx_menu_build_picks(lower, picks);
+}
+
+static void
+app_ctx_menu_update_layout(AppState *app, u32 client_w, u32 client_h, const CtxMenuPick *picks, s32 n)
+{
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
+    f32 pad = 3.0f * s;
+    /* Must match context menu border thickness in app_render (1.0f * s). */
+    f32 ctx_border = 1.0f * s;
+    f32 filter_h = 22.0f * s;
+    f32 row_h = app->text_ctx_menu.line_height + 4.0f * s;
+    f32 min_row = 22.0f * s;
+    if (row_h < min_row) {
+        row_h = min_row;
+    }
+
+    f32 min_w = 168.0f * s;
+    f32 label_w = min_w;
+    ArenaTemp temp = arena_temp_begin(&app->frame_arena);
+    for (s32 i = 0; i < n; ++i) {
+        f32 w = kb_text_measure_utf8_width(&app->frame_arena, &app->text_ctx_menu, k_ctx_menu_labels[picks[i].action]);
+        f32 row_slack = (picks[i].action == (u8)CtxAction_Launch) ? (8.0f * s) : (26.0f * s);
+        w += pad * 2.0f + row_slack;
+        if (w > label_w) {
+            label_w = w;
+        }
+    }
+    arena_temp_end(temp);
+
+    f32 panel_w = label_w;
+    f32 list_h = (f32)n * row_h;
+    f32 filter_list_gap = 4.0f * s;
+    f32 pad_bottom_extra = 5.0f * s;
+    f32 panel_h = ctx_border + filter_h + filter_list_gap + list_h + pad + pad_bottom_extra + ctx_border;
+    if (n == 0) {
+        panel_h = ctx_border + filter_h + pad + pad_bottom_extra + ctx_border;
+    }
+
+    f32 x = app->ctx_anchor_x;
+    f32 y = app->ctx_anchor_y;
+    f32 max_x = (f32)client_w - 4.0f * s - panel_w;
+    f32 max_y = (f32)client_h - 4.0f * s - panel_h;
+    if (x > max_x) {
+        x = max_x;
+    }
+    if (y > max_y) {
+        y = max_y;
+    }
+    if (x < 4.0f * s) {
+        x = 4.0f * s;
+    }
+    if (y < 4.0f * s) {
+        y = 4.0f * s;
+    }
+
+    app->ctx_panel_rect = ui_rect(x, y, panel_w, panel_h);
+    /* Filter strip: full width/top inside the menu border (no top_bar margin on L/T/R). */
+    app->ctx_filter_bar_rect = ui_rect(x + ctx_border, y + ctx_border, panel_w - ctx_border * 2.0f, filter_h);
+    f32 filter_text_pad_x = 6.0f * s;
+    f32 filter_text_pad_y = 2.0f * s;
+    app->ctx_filter_text_rect =
+        ui_inset(app->ctx_filter_bar_rect, filter_text_pad_x, filter_text_pad_y, filter_text_pad_x, filter_text_pad_y);
+    app->ctx_list_row0_y = y + ctx_border + filter_h + (n > 0 ? filter_list_gap : 0.0f);
+    app->ctx_row_h = row_h;
+    app->ctx_filtered_count = n;
+}
+
+/* Returns: -2 outside panel, -1 filter row, >= 0 filtered item index */
+static s32
+app_ctx_hit_test(AppState *app, f32 mx, f32 my)
+{
+    UiRect p = app->ctx_panel_rect;
+    if (mx < p.x || my < p.y || mx >= p.x + p.w || my >= p.y + p.h) {
+        return -2;
+    }
+    UiRect f = app->ctx_filter_bar_rect;
+    if (mx >= f.x && my >= f.y && mx < f.x + f.w && my < f.y + f.h) {
+        return -1;
+    }
+    if (app->ctx_filtered_count <= 0) {
+        return -2;
+    }
+    f32 ry = my - app->ctx_list_row0_y;
+    if (ry < 0.0f) {
+        return -2;
+    }
+    s32 slot = (s32)floorf(ry / app->ctx_row_h);
+    if (slot < 0 || slot >= app->ctx_filtered_count) {
+        return -2;
+    }
+    return slot;
+}
+
+static bool
+app_ctx_item_enabled(const LaunchItem *item, CtxAction action)
+{
+    (void)action;
+    return item && item->launch_path && item->launch_path[0];
+}
+
+static void
+app_ctx_run_action(AppState *app, CtxAction action)
+{
+    if (!app->ctx_open || app->ctx_target_index < 0 || (u32)app->ctx_target_index >= app->results.count) {
+        return;
+    }
+    const LaunchItem *item = app->results.items[(u32)app->ctx_target_index].item;
+    if (!app_ctx_item_enabled(item, action)) {
+        return;
+    }
+    switch (action) {
+    case CtxAction_Launch:
+        (void)platform_launch_item(item);
+        break;
+    case CtxAction_CopyPath: {
+        char *utf8 = utf8_from_wide(&app->frame_arena, item->launch_path);
+        (void)app_clipboard_set_utf8(app->hwnd, utf8, -1);
+    } break;
+    case CtxAction_OpenLocation:
+        (void)platform_open_file_location(item);
+        break;
+    default:
+        break;
+    }
+    app_hide(app);
+}
+
+static void
+app_ctx_activate_selection(AppState *app)
+{
+    CtxMenuPick picks[3];
+    s32 n = app_ctx_rebuild_picks(app, picks);
+    app_ctx_clamp_menu_selection(app, n);
+    if (n <= 0) {
+        return;
+    }
+    app_ctx_run_action(app, (CtxAction)picks[app->ctx_selected].action);
+}
+
+static void
+app_ctx_menu_open_at(AppState *app, s32 result_index, f32 anchor_x, f32 anchor_y)
+{
+    if (result_index < 0 || (u32)result_index >= app->results.count) {
+        return;
+    }
+    app_ctx_menu_close(app);
+    app->ctx_open = true;
+    app->ctx_target_index = result_index;
+    app->ctx_anchor_x = anchor_x;
+    app->ctx_anchor_y = anchor_y;
+    app->ctx_selected = 0;
+    app->ctx_hover_row = -1;
+    app->caret_blink_on = true;
+    app->caret_blink_tick_ms = GetTickCount();
+}
+
+static bool
+app_ctx_menu_keydown(AppState *app, HWND hwnd, WPARAM wParam, bool ctrl_down, bool shift_down)
+{
+    bool changed = false;
+    CtxMenuPick picks[3];
+    s32 n = app_ctx_rebuild_picks(app, picks);
+
+    switch (wParam) {
+    case VK_ESCAPE:
+        app_ctx_menu_close(app);
+        changed = true;
+        break;
+    case VK_RETURN:
+        app_ctx_activate_selection(app);
+        changed = true;
+        break;
+    case VK_UP:
+        app_ctx_clamp_menu_selection(app, n);
+        if (n > 0 && app->ctx_selected > 0) {
+            app->ctx_selected--;
+            changed = true;
+        }
+        break;
+    case VK_DOWN:
+        app_ctx_clamp_menu_selection(app, n);
+        if (n > 0 && app->ctx_selected < n - 1) {
+            app->ctx_selected++;
+            changed = true;
+        }
+        break;
+    case VK_TAB:
+        changed = true;
+        break;
+    case 'A':
+        if (ctrl_down) {
+            app->ctx_filter_anchor = 0;
+            app_ctx_filter_set_caret(app, app->ctx_filter_len, true);
+            changed = true;
+        }
+        break;
+    case 'C':
+        if (ctrl_down) {
+            (void)app_ctx_filter_copy_to_clipboard(app);
+            changed = true;
+        }
+        break;
+    case 'V':
+        if (ctrl_down) {
+            changed = app_ctx_filter_paste_from_clipboard(app);
+            n = app_ctx_rebuild_picks(app, picks);
+            app_ctx_clamp_menu_selection(app, n);
+        }
+        break;
+    case 'X':
+        if (ctrl_down) {
+            changed = app_ctx_filter_cut_to_clipboard(app);
+            n = app_ctx_rebuild_picks(app, picks);
+            app_ctx_clamp_menu_selection(app, n);
+        }
+        break;
+    case VK_BACK:
+        if (app_ctx_filter_has_selection(app)) {
+            changed = app_ctx_filter_delete_selection(app);
+        } else if (ctrl_down) {
+            s32 word_start = app_ctx_filter_word_left(app, app->ctx_filter_caret);
+            changed = app_ctx_filter_delete_range(app, word_start, app->ctx_filter_caret);
+        } else if (app->ctx_filter_caret > 0) {
+            changed = app_ctx_filter_delete_range(app, app->ctx_filter_caret - 1, app->ctx_filter_caret);
+        }
+        n = app_ctx_rebuild_picks(app, picks);
+        app_ctx_clamp_menu_selection(app, n);
+        break;
+    case VK_DELETE:
+        if (app_ctx_filter_has_selection(app)) {
+            changed = app_ctx_filter_delete_selection(app);
+        } else if (ctrl_down) {
+            s32 word_end = app_ctx_filter_word_right(app, app->ctx_filter_caret);
+            changed = app_ctx_filter_delete_range(app, app->ctx_filter_caret, word_end);
+        } else if (app->ctx_filter_caret < app->ctx_filter_len) {
+            changed = app_ctx_filter_delete_range(app, app->ctx_filter_caret, app->ctx_filter_caret + 1);
+        }
+        n = app_ctx_rebuild_picks(app, picks);
+        app_ctx_clamp_menu_selection(app, n);
+        break;
+    case VK_LEFT: {
+        s32 target = ctrl_down ? app_ctx_filter_word_left(app, app->ctx_filter_caret) : (app->ctx_filter_caret - 1);
+        app_ctx_filter_set_caret(app, target, shift_down);
+        changed = true;
+    } break;
+    case VK_RIGHT: {
+        s32 target = ctrl_down ? app_ctx_filter_word_right(app, app->ctx_filter_caret) : (app->ctx_filter_caret + 1);
+        app_ctx_filter_set_caret(app, target, shift_down);
+        changed = true;
+    } break;
+    case VK_HOME:
+        app_ctx_filter_set_caret(app, 0, shift_down);
+        changed = true;
+        break;
+    case VK_END:
+        app_ctx_filter_set_caret(app, app->ctx_filter_len, shift_down);
+        changed = true;
+        break;
+    default:
+        break;
+    }
+
+    if (changed) {
+        InvalidateRect(hwnd, NULL, FALSE);
+    }
+    return changed;
+}
+
+static void
+app_compute_list_geometry(AppState *app, u32 client_w, u32 client_h, AppListGeometry *g)
+{
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
+    const f32 border_thickness = 1.0f;
+    const f32 outer_padding = 1.5f * s;
+    const f32 header_gap = 2.0f * s;
+    const f32 footer_gap = 8.5f * s;
+    const f32 footer_h = 16.0f * s;
+
+    UiRect window_rect = ui_rect(0.0f, 0.0f, (f32)client_w, (f32)client_h);
+    UiRect content_rect = ui_inset(window_rect, border_thickness, border_thickness, border_thickness, border_thickness);
+    UiRect top_bar_rect = ui_rect(content_rect.x + outer_padding, content_rect.y + outer_padding, content_rect.w - outer_padding * 2.0f, 48.0f * s);
+    UiRect footer_rect = ui_rect(content_rect.x + outer_padding + 3.0f * s,
+                                 content_rect.y + content_rect.h - footer_gap - footer_h,
+                                 300.0f * s, footer_h);
+    f32 list_top = top_bar_rect.y + top_bar_rect.h + header_gap;
+    f32 list_h = footer_rect.y - footer_gap - list_top;
+    if (list_h < 0.0f) {
+        list_h = 0.0f;
+    }
+    UiRect list_rect = ui_rect(content_rect.x + outer_padding, list_top, content_rect.w - outer_padding * 2.0f, list_h);
+    g->list_content_rect = ui_inset(list_rect, 5.0f * s, 4.0f * s, 5.0f * s, 4.0f * s);
+    g->row_step = app_results_row_step(app);
+    g->first_row_y = g->list_content_rect.y + 2.5f * s;
+    g->rows_per_page = app_result_rows_per_page(app);
+    bool show_scrollbar = ((s32)app->results.count > g->rows_per_page);
+    f32 scrollbar_track_w = 8.0f * s;
+    f32 scrollbar_inset = 6.0f * s;
+    f32 scrollbar_reserved_w = show_scrollbar ? (scrollbar_track_w + scrollbar_inset * 2.0f) : 0.0f;
+    g->content_right = g->list_content_rect.x + g->list_content_rect.w - scrollbar_reserved_w;
+    g->start_index = app->results_top_index;
+}
+
 static void
 app_center_window(AppState *app)
 {
@@ -479,6 +1109,7 @@ app_show(AppState *app)
 static void
 app_hide(AppState *app)
 {
+    app_ctx_menu_close(app);
     app->visible = false;
     app->hover_result_index = -1;
     debug_log_wide(L"app_hide");
@@ -512,6 +1143,7 @@ app_init_catalog(AppState *app)
 static void
 app_refresh_results(AppState *app)
 {
+    app_ctx_menu_close(app);
     arena_reset(&app->results_arena);
 
     char lower_query[LAUNCHER_MAX_QUERY];
@@ -658,66 +1290,36 @@ app_hit_test_result_index(AppState *app, f32 mx, f32 my, u32 client_w, u32 clien
     if (app->results.count == 0) {
         return -1;
     }
-    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
-    const f32 border_thickness = 1.0f;
-    const f32 outer_padding = 3.0f * s;
-    const f32 header_gap = 3.0f * s;
-    const f32 footer_gap = 10.0f * s;
-    const f32 footer_h = 16.0f * s;
+    AppListGeometry g;
+    app_compute_list_geometry(app, client_w, client_h, &g);
 
-    UiRect window_rect = ui_rect(0.0f, 0.0f, (f32)client_w, (f32)client_h);
-    UiRect content_rect = ui_inset(window_rect, border_thickness, border_thickness, border_thickness, border_thickness);
-    UiRect top_bar_rect = ui_rect(content_rect.x + outer_padding, content_rect.y + outer_padding, content_rect.w - outer_padding * 2.0f, 48.0f * s);
-    UiRect footer_rect = ui_rect(content_rect.x + outer_padding + 4.0f * s,
-                                 content_rect.y + content_rect.h - footer_gap - footer_h,
-                                 300.0f * s, footer_h);
-    f32 list_top = top_bar_rect.y + top_bar_rect.h + header_gap;
-    f32 list_h = footer_rect.y - footer_gap - list_top;
-    if (list_h < 0.0f) {
-        list_h = 0.0f;
-    }
-    UiRect list_rect = ui_rect(content_rect.x + outer_padding, list_top, content_rect.w - outer_padding * 2.0f, list_h);
-    UiRect list_content_rect = ui_inset(list_rect, 6.0f * s, 6.0f * s, 6.0f * s, 6.0f * s);
-
-    s32 rows_per_page = app_result_rows_per_page(app);
-    f32 row_step = app_results_row_step(app);
-    bool show_scrollbar = ((s32)app->results.count > rows_per_page);
-    f32 scrollbar_track_w = 8.0f * s;
-    f32 scrollbar_inset = 6.0f * s;
-    f32 scrollbar_reserved_w = show_scrollbar ? (scrollbar_track_w + scrollbar_inset * 2.0f) : 0.0f;
-    f32 row_x = list_content_rect.x;
-    f32 content_right = list_content_rect.x + list_content_rect.w - scrollbar_reserved_w;
-    (void)row_x;
-
-    if (mx < list_content_rect.x || my < list_content_rect.y) {
+    if (mx < g.list_content_rect.x || my < g.list_content_rect.y) {
         return -1;
     }
-    if (mx >= content_right || my >= list_content_rect.y + list_content_rect.h) {
+    if (mx >= g.content_right || my >= g.list_content_rect.y + g.list_content_rect.h) {
         return -1;
     }
 
-    f32 first_row_y = list_content_rect.y + 3.0f * s;
-    if (my < first_row_y) {
+    if (my < g.first_row_y) {
         return -1;
     }
-    f32 rel_y = my - first_row_y;
-    if (row_step <= 0.0f) {
+    f32 rel_y = my - g.first_row_y;
+    if (g.row_step <= 0.0f) {
         return -1;
     }
-    s32 slot = (s32)floorf(rel_y / row_step);
+    s32 slot = (s32)floorf(rel_y / g.row_step);
     if (slot < 0) {
         return -1;
     }
-    s32 start_index = app->results_top_index;
-    s32 end_index = start_index + rows_per_page;
+    s32 end_index = g.start_index + g.rows_per_page;
     if (end_index > (s32)app->results.count) {
         end_index = (s32)app->results.count;
     }
-    s32 vis_count = end_index - start_index;
+    s32 vis_count = end_index - g.start_index;
     if (slot >= vis_count) {
         return -1;
     }
-    s32 idx = start_index + slot;
+    s32 idx = g.start_index + slot;
     if (idx < 0 || idx >= (s32)app->results.count) {
         return -1;
     }
@@ -830,12 +1432,22 @@ app_activate_selection(AppState *app)
 static void
 draw_text_line_font(AppState *app, KbTextSystem *font, Arena *frame, f32 x, f32 baseline_y, const char *text, RenderColor color)
 {
+    u32 slot = 0;
+    void *want_srv = (void *)app->renderer.atlas_srv;
+    if (font == &app->text_results) {
+        slot = 1u;
+        want_srv = (void *)app->renderer.atlas_srv_b;
+    } else if (font == &app->text_ctx_menu) {
+        slot = 2u;
+        want_srv = (void *)app->renderer.atlas_srv_c;
+    } else if (font == &app->text_query) {
+        slot = 3u;
+        want_srv = (void *)app->renderer.atlas_srv_d;
+    }
     if (font->raster.atlas_dirty) {
-        u32 slot = (font == &app->text_results) ? 1u : 0u;
         dx11_renderer_upload_atlas(&app->renderer, &font->raster, slot);
         ((FontRaster *)&font->raster)->atlas_dirty = false;
     }
-    void *want_srv = (font == &app->text_results) ? (void *)app->renderer.atlas_srv_b : (void *)app->renderer.atlas_srv;
     if (app->renderer.vertex_count > 0 && (void *)app->renderer.pending_text_srv != want_srv) {
         dx11_renderer_flush(&app->renderer);
     }
@@ -1026,6 +1638,8 @@ app_load_text_systems(AppState *app, const wchar_t *font_path)
 {
     f32 ui_h = LAUNCHER_UI_FONT_PX * app->dpi_scale;
     f32 res_h = LAUNCHER_RESULTS_FONT_PX * app->dpi_scale;
+    f32 query_h = LAUNCHER_QUERY_FONT_PX * app->dpi_scale;
+    f32 ctx_h = LAUNCHER_CTX_MENU_FONT_PX * app->dpi_scale;
     if (!kb_text_init(&app->text, font_path, ui_h)) {
         return false;
     }
@@ -1037,12 +1651,29 @@ app_load_text_systems(AppState *app, const wchar_t *font_path)
     }
     dx11_renderer_upload_atlas(&app->renderer, &app->text_results.raster, 1);
     app->text_results.raster.atlas_dirty = false;
+    if (!kb_text_init(&app->text_query, font_path, query_h)) {
+        kb_text_shutdown(&app->text_results);
+        kb_text_shutdown(&app->text);
+        return false;
+    }
+    dx11_renderer_upload_atlas(&app->renderer, &app->text_query.raster, 3);
+    app->text_query.raster.atlas_dirty = false;
+    if (!kb_text_init(&app->text_ctx_menu, font_path, ctx_h)) {
+        kb_text_shutdown(&app->text_query);
+        kb_text_shutdown(&app->text_results);
+        kb_text_shutdown(&app->text);
+        return false;
+    }
+    dx11_renderer_upload_atlas(&app->renderer, &app->text_ctx_menu.raster, 2);
+    app->text_ctx_menu.raster.atlas_dirty = false;
     return true;
 }
 
 static void
 app_unload_text_systems(AppState *app)
 {
+    kb_text_shutdown(&app->text_ctx_menu);
+    kb_text_shutdown(&app->text_query);
     kb_text_shutdown(&app->text_results);
     kb_text_shutdown(&app->text);
 }
@@ -1207,23 +1838,23 @@ app_render(AppState *app)
     arena_reset(&app->frame_arena);
     app->frame_counter += 1;
     app_process_icon_completions(app, 8);
-    dx11_renderer_begin(&app->renderer, (RenderColor){0.06f, 0.07f, 0.09f, 1.0f});
+    dx11_renderer_begin(&app->renderer, (RenderColor){0.038f, 0.044f, 0.058f, 1.0f});
     UiDrawList draw_list = {0};
     ui_drawlist_begin(&draw_list, &app->frame_arena, 8192);
     UiTheme theme = ui_theme_default();
 
     f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
     const f32 border_thickness = 1.0f;
-    const f32 outer_padding = 3.0f * s;
-    const f32 header_gap = 3.0f * s;
-    const f32 footer_gap = 10.0f * s;
+    const f32 outer_padding = 1.5f * s;
+    const f32 header_gap = 2.0f * s;
+    const f32 footer_gap = 8.5f * s;
     const f32 footer_h = 16.0f * s;
     const RenderColor border_color = (RenderColor){0.20f, 0.50f, 0.95f, 1.0f};
 
     UiRect window_rect = ui_rect(0.0f, 0.0f, (f32)width, (f32)height);
     UiRect content_rect = ui_inset(window_rect, border_thickness, border_thickness, border_thickness, border_thickness);
     UiRect top_bar_rect = ui_rect(content_rect.x + outer_padding, content_rect.y + outer_padding, content_rect.w - outer_padding * 2.0f, 48.0f * s);
-    UiRect footer_rect = ui_rect(content_rect.x + outer_padding + 4.0f * s,
+    UiRect footer_rect = ui_rect(content_rect.x + outer_padding + 3.0f * s,
                                  content_rect.y + content_rect.h - footer_gap - footer_h,
                                  300.0f * s, footer_h);
     f32 list_top = top_bar_rect.y + top_bar_rect.h + header_gap;
@@ -1232,10 +1863,10 @@ app_render(AppState *app)
         list_h = 0.0f;
     }
     UiRect list_rect = ui_rect(content_rect.x + outer_padding, list_top, content_rect.w - outer_padding * 2.0f, list_h);
-    UiRect list_content_rect = ui_inset(list_rect, 6.0f * s, 6.0f * s, 6.0f * s, 6.0f * s);
+    UiRect list_content_rect = ui_inset(list_rect, 5.0f * s, 4.0f * s, 5.0f * s, 4.0f * s);
     const f32 top_row_h = 30.0f * s;
-    const f32 top_row_pad_left = 11.0f * s;
-    const f32 top_row_pad_right = 6.0f * s;
+    const f32 top_row_pad_left = 9.0f * s;
+    const f32 top_row_pad_right = 5.0f * s;
     UiRect top_row_rect = ui_rect(top_bar_rect.x + top_row_pad_left,
                                   top_bar_rect.y + (top_bar_rect.h - top_row_h) * 0.5f,
                                   top_bar_rect.w - top_row_pad_left - top_row_pad_right,
@@ -1249,17 +1880,18 @@ app_render(AppState *app)
     input_control.caret_index = app->query_caret;
     input_control.sel_start = app->query_anchor;
     input_control.sel_end = app->query_caret;
-    input_control.caret_visible = app->caret_blink_on;
+    input_control.caret_visible =
+        app->caret_blink_on && !app->ctx_open && (GetFocus() == app->hwnd);
 
     ui_control_border(&draw_list, window_rect, border_thickness, border_color);
     ui_control_panel(&draw_list, content_rect, theme.bg_window);
     ui_control_panel(&draw_list, top_bar_rect, theme.bg_top_bar);
     ui_control_panel(&draw_list, list_rect, theme.bg_results_panel);
     ui_push_clip_rect(&draw_list, input_control.bounds);
-    ui_control_text_input(&draw_list, &app->frame_arena, &input_control, &theme, &app->text_results, s);
+    ui_control_text_input(&draw_list, &app->frame_arena, &input_control, &theme, &app->text_query, s);
     ui_pop_clip(&draw_list);
 
-    f32 row_top = list_content_rect.y + 3.0f * s;
+    f32 row_top = list_content_rect.y + 2.5f * s;
     f32 row_step = app_results_row_step(app);
     f32 row_height = row_step;
     s32 rows_per_page = app_result_rows_per_page(app);
@@ -1359,7 +1991,7 @@ app_render(AppState *app)
     if (app->results.count == 0) {
         ui_draw_text_font(&draw_list,
                           list_content_rect.x + 2.0f * s,
-                          list_content_rect.y + 3.0f * s + app->text_results.pixel_height,
+                          list_content_rect.y + 2.5f * s + app->text_results.pixel_height,
                           "No matches",
                           theme.fg_secondary,
                           &app->text_results);
@@ -1386,6 +2018,57 @@ app_render(AppState *app)
         (double)app->renderer.text_alpha_gamma,
         (double)app->renderer.text_gamma_blend);
     ui_control_footer(&draw_list, footer_rect, diagnostics, theme.fg_footer, &app->text_results);
+
+    if (app->ctx_open) {
+        CtxMenuPick ctx_picks[3];
+        s32 ctx_n = app_ctx_rebuild_picks(app, ctx_picks);
+        app_ctx_clamp_menu_selection(app, ctx_n);
+        app_ctx_menu_update_layout(app, width, height, ctx_picks, ctx_n);
+        f32 ctx_pad = 8.0f * s;
+        ui_control_context_menu_panel(&draw_list, app->ctx_panel_rect, theme.bg_top_bar, border_color, 1.0f * s);
+        /* Slightly darker than bg_top_bar so the filter reads as its own field */
+        RenderColor ctx_filter_bg = {0.08f, 0.09f, 0.12f, 1.0f};
+        ui_draw_rect(&draw_list, app->ctx_filter_bar_rect, ctx_filter_bg);
+        UiTextInputControl ctx_input = {0};
+        ctx_input.bounds = app->ctx_filter_text_rect;
+        ctx_input.text = app->ctx_filter;
+        ctx_input.placeholder = "Filter...";
+        ctx_input.has_text = (app->ctx_filter_len > 0);
+        ctx_input.scroll_x = &app->ctx_filter_scroll_x;
+        ctx_input.caret_index = app->ctx_filter_caret;
+        ctx_input.sel_start = app->ctx_filter_anchor;
+        ctx_input.sel_end = app->ctx_filter_caret;
+        ctx_input.caret_visible =
+            app->caret_blink_on && app->ctx_open && (GetFocus() == app->hwnd);
+        ui_push_clip_rect(&draw_list, app->ctx_filter_text_rect);
+        ui_control_text_input(&draw_list, &app->frame_arena, &ctx_input, &theme, &app->text_ctx_menu, s);
+        ui_pop_clip(&draw_list);
+        if (app->ctx_target_index >= 0 && (u32)app->ctx_target_index < app->results.count) {
+            const LaunchItem *ctx_item = app->results.items[(u32)app->ctx_target_index].item;
+            for (s32 ci = 0; ci < ctx_n; ++ci) {
+                f32 row_y = app->ctx_list_row0_y + (f32)ci * app->ctx_row_h;
+                UiRect ctx_row = ui_rect(app->ctx_panel_rect.x + ctx_pad, row_y, app->ctx_panel_rect.w - ctx_pad * 2.0f, app->ctx_row_h);
+                CtxAction act = (CtxAction)ctx_picks[ci].action;
+                bool ctx_en = app_ctx_item_enabled(ctx_item, act);
+                void *ctx_icon_srv = NULL;
+                u32 act_i = (u32)ctx_picks[ci].action;
+                if (act != CtxAction_Launch && act_i < CTX_MENU_ICON_COUNT && app->ctx_menu_icons[act_i].srv) {
+                    ctx_icon_srv = (void *)app->ctx_menu_icons[act_i].srv;
+                }
+                ui_control_context_menu_item(&draw_list,
+                                             &app->frame_arena,
+                                             &theme,
+                                             &app->text_ctx_menu,
+                                             s,
+                                             ctx_row,
+                                             ci == app->ctx_selected,
+                                             ci == app->ctx_hover_row,
+                                             ctx_en,
+                                             k_ctx_menu_labels[ctx_picks[ci].action],
+                                             ctx_icon_srv);
+            }
+        }
+    }
 
     app_flush_ui_draw_list(app, &draw_list, width, height);
     dx11_renderer_end(&app->renderer);
@@ -1472,6 +2155,28 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_CHAR:
+        if (app && app->visible && app->ctx_open) {
+            if (wParam >= 32u && wParam != 127u) {
+                bool chg = false;
+                if (wParam < 128u) {
+                    chg = app_ctx_filter_insert_char(app, (char)wParam);
+                } else {
+                    wchar_t wch[2] = {(wchar_t)wParam, 0};
+                    char utf8_tmp[8];
+                    int nb = WideCharToMultiByte(CP_UTF8, 0, wch, -1, utf8_tmp, (int)sizeof(utf8_tmp), NULL, NULL);
+                    if (nb > 1) {
+                        chg = app_ctx_filter_insert_utf8(app, utf8_tmp);
+                    }
+                }
+                if (chg) {
+                    CtxMenuPick picks[3];
+                    s32 n = app_ctx_rebuild_picks(app, picks);
+                    app_ctx_clamp_menu_selection(app, n);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
+            return 0;
+        }
         if (app && app->visible && wParam >= 32 && wParam < 127) {
             if (app_query_insert_char(app, (char)wParam)) {
                 app_refresh_results(app);
@@ -1483,10 +2188,36 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (app && app->visible) {
             bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (app->ctx_open) {
+                app_ctx_menu_keydown(app, hwnd, wParam, ctrl_down, shift_down);
+                return 0;
+            }
+            if (wParam == VK_APPS || (wParam == VK_F10 && shift_down && !ctrl_down)) {
+                if (app->selected_index >= 0 && (u32)app->selected_index < app->results.count) {
+                    RECT cr;
+                    GetClientRect(hwnd, &cr);
+                    u32 cw = (u32)(cr.right - cr.left);
+                    u32 ch = (u32)(cr.bottom - cr.top);
+                    AppListGeometry geo;
+                    app_compute_list_geometry(app, cw, ch, &geo);
+                    f32 sf = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
+                    s32 rel = app->selected_index - geo.start_index;
+                    f32 ay = geo.first_row_y;
+                    if (rel >= 0 && rel < geo.rows_per_page) {
+                        ay = geo.first_row_y + (f32)rel * geo.row_step;
+                    }
+                    f32 ax = geo.list_content_rect.x + 10.0f * sf;
+                    app_ctx_menu_open_at(app, app->selected_index, ax, ay);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+                return 0;
+            }
             bool query_changed = false;
             bool handled = true;
             switch (wParam) {
-            case VK_ESCAPE: app_hide(app); break;
+            case VK_ESCAPE:
+                app_hide(app);
+                break;
             case 'A':
                 if (ctrl_down) {
                     app->query_anchor = 0;
@@ -1604,10 +2335,27 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             GetClientRect(hwnd, &cr);
             s32 mx = (s32)(short)LOWORD(lParam);
             s32 my = (s32)(short)HIWORD(lParam);
-            s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, (u32)(cr.right - cr.left), (u32)(cr.bottom - cr.top));
-            if (hit != app->hover_result_index) {
-                app->hover_result_index = hit;
-                InvalidateRect(hwnd, NULL, FALSE);
+            if (app->ctx_open) {
+                s32 ch = app_ctx_hit_test(app, (f32)mx, (f32)my);
+                s32 nh = (ch >= 0) ? ch : -1;
+                bool inv = false;
+                if (nh != app->ctx_hover_row) {
+                    app->ctx_hover_row = nh;
+                    inv = true;
+                }
+                if (app->hover_result_index >= 0) {
+                    app->hover_result_index = -1;
+                    inv = true;
+                }
+                if (inv) {
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            } else {
+                s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, (u32)(cr.right - cr.left), (u32)(cr.bottom - cr.top));
+                if (hit != app->hover_result_index) {
+                    app->hover_result_index = hit;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
             }
         }
         return 0;
@@ -1617,13 +2365,57 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
+    case WM_RBUTTONDOWN:
+        if (app && app->visible) {
+            RECT cr;
+            GetClientRect(hwnd, &cr);
+            u32 cw = (u32)(cr.right - cr.left);
+            u32 ch = (u32)(cr.bottom - cr.top);
+            s32 mx = (s32)(short)LOWORD(lParam);
+            s32 my = (s32)(short)HIWORD(lParam);
+            if (app->ctx_open) {
+                s32 chit = app_ctx_hit_test(app, (f32)mx, (f32)my);
+                if (chit == -2) {
+                    app_ctx_menu_close(app);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+                return 0;
+            }
+            s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, cw, ch);
+            if (hit >= 0) {
+                app->selected_index = hit;
+                app_ctx_menu_open_at(app, hit, (f32)mx, (f32)my);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
+        return 0;
     case WM_LBUTTONDOWN:
         if (app && app->visible) {
             RECT cr;
             GetClientRect(hwnd, &cr);
+            u32 cw = (u32)(cr.right - cr.left);
+            u32 ch = (u32)(cr.bottom - cr.top);
             s32 mx = (s32)(short)LOWORD(lParam);
             s32 my = (s32)(short)HIWORD(lParam);
-            s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, (u32)(cr.right - cr.left), (u32)(cr.bottom - cr.top));
+            if (app->ctx_open) {
+                s32 chit = app_ctx_hit_test(app, (f32)mx, (f32)my);
+                if (chit == -2) {
+                    app_ctx_menu_close(app);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+                if (chit == -1) {
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+                if (chit >= 0) {
+                    app->ctx_selected = chit;
+                    app_ctx_activate_selection(app);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+            }
+            s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, cw, ch);
             if (hit >= 0) {
                 app->selected_index = hit;
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -1633,6 +2425,9 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_MOUSEWHEEL:
         if (app && app->visible) {
+            if (app->ctx_open) {
+                return 0;
+            }
             s16 wheel_delta = GET_WHEEL_DELTA_WPARAM(wParam);
             if (wheel_delta != 0) {
                 app_scroll_results_list(app, (s32)wheel_delta);
@@ -1640,6 +2435,11 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
         }
         return 0;
+    case WM_CONTEXTMENU:
+        if (app && app->visible) {
+            return 0;
+        }
+        break;
     case WM_TIMER:
         if (app && app->visible) {
             u32 now = GetTickCount();
@@ -1739,6 +2539,10 @@ app_init(AppState *app, HINSTANCE instance)
     dx11_renderer_set_text_render_mode(&app->renderer, TextRenderMode_FullGammaAlpha);
     debug_log_wide(L"renderer initialized");
 
+    if (!ctx_menu_icons_load(&app->renderer, app->install_dir, app->ctx_menu_icons)) {
+        debug_log_wide(L"ctx_menu_icons_load failed (expected %ls\\data\\icons\\ctx_*.svg)", app->install_dir);
+    }
+
     if (!icon_worker_init(&app->icon_worker)) {
         debug_log_wide(L"icon_worker_init failed");
         return false;
@@ -1773,6 +2577,7 @@ app_shutdown(AppState *app)
 {
     UnregisterHotKey(app->hwnd, LAUNCHER_HOTKEY_ID);
     app_shutdown_icon_cache(app);
+    ctx_menu_icons_destroy(app->ctx_menu_icons);
     app_unload_text_systems(app);
     dx11_renderer_shutdown(&app->renderer);
     arena_destroy(&app->frame_arena);

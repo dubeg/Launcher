@@ -103,3 +103,39 @@ platform_launch_item(const LaunchItem *item)
     info.lpParameters = item->arguments;
     return ShellExecuteExW(&info) == TRUE;
 }
+
+bool
+platform_open_file_location(const LaunchItem *item)
+{
+    if (!item || !item->launch_path || !item->launch_path[0]) {
+        return false;
+    }
+
+    wchar_t windir[MAX_PATH];
+    if (GetEnvironmentVariableW(L"WINDIR", windir, array_count(windir)) == 0) {
+        return false;
+    }
+
+    wchar_t explorer_path[MAX_PATH];
+    _snwprintf_s(explorer_path, array_count(explorer_path), _TRUNCATE, L"%ls\\explorer.exe", windir);
+
+    SHELLEXECUTEINFOW info;
+    ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOASYNC;
+    info.nShow = SW_SHOWNORMAL;
+    info.lpVerb = L"open";
+    info.lpFile = explorer_path;
+
+    if (path_is_directory_wide(item->launch_path)) {
+        info.lpParameters = item->launch_path;
+    } else {
+        wchar_t path_buf[MAX_PATH * 8];
+        wcsncpy_s(path_buf, array_count(path_buf), item->launch_path, _TRUNCATE);
+        path_strip_trailing_separators(path_buf);
+        wchar_t params[MAX_PATH * 8 + 32];
+        _snwprintf_s(params, array_count(params), _TRUNCATE, L"/select,\"%ls\"", path_buf);
+        info.lpParameters = params;
+    }
+    return ShellExecuteExW(&info) == TRUE;
+}

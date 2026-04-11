@@ -147,6 +147,19 @@ void ui_control_footer(UiDrawList *list, UiRect bounds, const char *text, Render
 void ui_control_results_row(UiDrawList *list, UiRect bounds, bool selected, RenderColor selected_bg);
 void ui_control_scrollbar(UiDrawList *list, const UiScrollbarControl *scrollbar, RenderColor track_color, RenderColor thumb_color);
 
+void ui_control_context_menu_panel(UiDrawList *list, UiRect bounds, RenderColor fill, RenderColor border_color, f32 border_thickness);
+void ui_control_context_menu_item(UiDrawList *list,
+                                  Arena *arena,
+                                  const UiTheme *theme,
+                                  struct KbTextSystem *font,
+                                  f32 dpi_scale,
+                                  UiRect row,
+                                  bool selected,
+                                  bool hover,
+                                  bool enabled,
+                                  const char *text,
+                                  void *icon_texture_srv);
+
 f32 ui_shortcut_lnk_badge_chip_width(Arena *arena, struct KbTextSystem *font, f32 dpi_scale, const char *label);
 void ui_control_shortcut_lnk_badge(UiDrawList *list, Arena *arena, struct KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height,
                                    f32 dpi_scale, const char *label, RenderColor chip_bg, RenderColor label_fg);

@@ -4,5 +4,6 @@
 #include "../app/app.h"
 
 bool platform_launch_item(const LaunchItem *item);
+bool platform_open_file_location(const LaunchItem *item);
 
 #endif

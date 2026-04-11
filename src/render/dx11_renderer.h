@@ -57,6 +57,10 @@ typedef struct Dx11Renderer {
     struct ID3D11ShaderResourceView *atlas_srv;
     struct ID3D11Texture2D *atlas_texture_b;
     struct ID3D11ShaderResourceView *atlas_srv_b;
+    struct ID3D11Texture2D *atlas_texture_c;
+    struct ID3D11ShaderResourceView *atlas_srv_c;
+    struct ID3D11Texture2D *atlas_texture_d;
+    struct ID3D11ShaderResourceView *atlas_srv_d;
     struct ID3D11ShaderResourceView *pending_text_srv;
     struct ID3D11Texture2D *white_texture;
     struct ID3D11ShaderResourceView *white_srv;

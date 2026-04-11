@@ -12,6 +12,7 @@ add_executable(launcher WIN32
     src/text/font_raster.c
     src/text/kb_text.c
     src/ui/ui.c
+    src/ui/ctx_menu_icons.c
     src/platform/catalog.c
     src/platform/catalog_aliases.c
     src/platform/everything_client.c
@@ -27,6 +28,7 @@ add_executable(launcher WIN32
 target_include_directories(launcher PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nanosvg
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fzy
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/everything_sdk/sdk/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/everything_sdk/sdk/ipc
@@ -37,6 +39,12 @@ target_compile_definitions(launcher PRIVATE
     UNICODE
     _UNICODE
 )
+
+add_custom_command(TARGET launcher POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/data"
+        "$<TARGET_FILE_DIR:launcher>/data"
+    COMMENT "Copying data/ (SVG icons, etc.) next to launcher.exe")
 
 target_link_libraries(launcher PRIVATE
     d3d11

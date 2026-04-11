@@ -10,19 +10,19 @@ UiTheme
 ui_theme_default(void)
 {
     UiTheme theme = {0};
-    theme.bg_window = (RenderColor){0.06f, 0.07f, 0.09f, 1.0f};
-    theme.bg_top_bar = (RenderColor){0.11f, 0.12f, 0.15f, 1.0f};
-    theme.bg_results_panel = (RenderColor){0.09f, 0.10f, 0.13f, 1.0f};
+    theme.bg_window = (RenderColor){0.038f, 0.044f, 0.058f, 1.0f};
+    theme.bg_top_bar = (RenderColor){0.078f, 0.088f, 0.108f, 1.0f};
+    theme.bg_results_panel = (RenderColor){0.060f, 0.070f, 0.090f, 1.0f};
     theme.fg_primary = (RenderColor){0.97f, 0.98f, 1.0f, 1.0f};
     theme.fg_secondary = (RenderColor){0.46f, 0.50f, 0.56f, 1.0f};
     theme.fg_footer = (RenderColor){0.56f, 0.60f, 0.66f, 1.0f};
     theme.mode_pill_bg = (RenderColor){0.14f, 0.22f, 0.36f, 1.0f};
     theme.mode_pill_fg = (RenderColor){0.78f, 0.82f, 0.88f, 1.0f};
     theme.row_selected_bg = (RenderColor){0.16f, 0.25f, 0.42f, 1.0f};
-    theme.row_hover_bg = (RenderColor){0.13f, 0.16f, 0.22f, 1.0f};
+    theme.row_hover_bg = (RenderColor){0.100f, 0.128f, 0.172f, 1.0f};
     theme.input_selection_bg = (RenderColor){0.24f, 0.43f, 0.75f, 0.35f};
     theme.input_caret = (RenderColor){0.97f, 0.98f, 1.0f, 1.0f};
-    theme.scrollbar_track = (RenderColor){0.18f, 0.20f, 0.25f, 0.9f};
+    theme.scrollbar_track = (RenderColor){0.145f, 0.165f, 0.205f, 0.9f};
     theme.scrollbar_thumb = (RenderColor){0.40f, 0.46f, 0.58f, 0.95f};
     return theme;
 }
@@ -217,6 +217,70 @@ void
 ui_control_panel(UiDrawList *list, UiRect bounds, RenderColor color)
 {
     ui_draw_rect(list, bounds, color);
+}
+
+void
+ui_control_context_menu_panel(UiDrawList *list, UiRect bounds, RenderColor fill, RenderColor border_color, f32 border_thickness)
+{
+    if (!list) {
+        return;
+    }
+    ui_draw_rect(list, bounds, fill);
+    if (border_thickness > 0.0f) {
+        ui_control_border(list, bounds, border_thickness, border_color);
+    }
+}
+
+void
+ui_control_context_menu_item(UiDrawList *list,
+                             Arena *arena,
+                             const UiTheme *theme,
+                             KbTextSystem *font,
+                             f32 dpi_scale,
+                             UiRect row,
+                             bool selected,
+                             bool hover,
+                             bool enabled,
+                             const char *text,
+                             void *icon_texture_srv)
+{
+    if (!list || !theme || !font || !arena) {
+        return;
+    }
+    f32 s = dpi_scale > 0.0f ? dpi_scale : 1.0f;
+    RenderColor fg = enabled ? theme->fg_primary : theme->fg_footer;
+    if (selected) {
+        ui_draw_rect(list, row, theme->row_selected_bg);
+    } else if (hover) {
+        ui_draw_rect(list, row, theme->row_hover_bg);
+    }
+    KbTextLineLayout line = {0};
+    kb_text_line_layout_centered(font, row.y, row.h, &line);
+    f32 pad = 2.0f * s;
+    f32 text_x = row.x + pad;
+    f32 right = row.x + row.w - pad;
+    if (icon_texture_srv) {
+        f32 icon_side = row.h - 4.0f * s;
+        f32 min_icon = 12.0f * s;
+        f32 max_icon = 18.0f * s;
+        if (icon_side < min_icon) {
+            icon_side = min_icon;
+        }
+        if (icon_side > max_icon) {
+            icon_side = max_icon;
+        }
+        f32 icon_gap = 7.0f * s;
+        f32 iy = row.y + (row.h - icon_side) * 0.5f;
+        ui_draw_image(list, ui_rect(text_x, iy, icon_side, icon_side), icon_texture_srv, fg);
+        text_x += icon_side + icon_gap;
+    }
+    f32 max_w = right - text_x;
+    if (max_w < 4.0f) {
+        max_w = 4.0f;
+    }
+    if (text && text[0]) {
+        ui_draw_text_font_clamped(list, text_x, line.baseline_y, text, fg, font, max_w);
+    }
 }
 
 void

@@ -330,6 +330,10 @@ dx11_renderer_shutdown(Dx11Renderer *renderer)
     }
     safe_release((IUnknown **)&renderer->white_srv);
     safe_release((IUnknown **)&renderer->white_texture);
+    safe_release((IUnknown **)&renderer->atlas_srv_d);
+    safe_release((IUnknown **)&renderer->atlas_texture_d);
+    safe_release((IUnknown **)&renderer->atlas_srv_c);
+    safe_release((IUnknown **)&renderer->atlas_texture_c);
     safe_release((IUnknown **)&renderer->atlas_srv_b);
     safe_release((IUnknown **)&renderer->atlas_texture_b);
     safe_release((IUnknown **)&renderer->atlas_srv);
@@ -543,11 +547,30 @@ dx11_renderer_upload_atlas(Dx11Renderer *renderer, const FontRaster *raster, u32
         ID3D11DeviceContext_UpdateSubresource(renderer->context, (ID3D11Resource *)renderer->atlas_texture, 0, NULL, raster->atlas_pixels, raster->atlas_width * 4, 0);
         return;
     }
-    if (!renderer->atlas_texture_b) {
-        create_texture_rgba(renderer->device, raster->atlas_width, raster->atlas_height, raster->atlas_pixels, &renderer->atlas_texture_b, &renderer->atlas_srv_b);
+    if (atlas_index == 1) {
+        if (!renderer->atlas_texture_b) {
+            create_texture_rgba(renderer->device, raster->atlas_width, raster->atlas_height, raster->atlas_pixels, &renderer->atlas_texture_b, &renderer->atlas_srv_b);
+            return;
+        }
+        ID3D11DeviceContext_UpdateSubresource(renderer->context, (ID3D11Resource *)renderer->atlas_texture_b, 0, NULL, raster->atlas_pixels, raster->atlas_width * 4, 0);
         return;
     }
-    ID3D11DeviceContext_UpdateSubresource(renderer->context, (ID3D11Resource *)renderer->atlas_texture_b, 0, NULL, raster->atlas_pixels, raster->atlas_width * 4, 0);
+    if (atlas_index == 2) {
+        if (!renderer->atlas_texture_c) {
+            create_texture_rgba(renderer->device, raster->atlas_width, raster->atlas_height, raster->atlas_pixels, &renderer->atlas_texture_c, &renderer->atlas_srv_c);
+            return;
+        }
+        ID3D11DeviceContext_UpdateSubresource(renderer->context, (ID3D11Resource *)renderer->atlas_texture_c, 0, NULL, raster->atlas_pixels, raster->atlas_width * 4, 0);
+        return;
+    }
+    if (atlas_index == 3) {
+        if (!renderer->atlas_texture_d) {
+            create_texture_rgba(renderer->device, raster->atlas_width, raster->atlas_height, raster->atlas_pixels, &renderer->atlas_texture_d, &renderer->atlas_srv_d);
+            return;
+        }
+        ID3D11DeviceContext_UpdateSubresource(renderer->context, (ID3D11Resource *)renderer->atlas_texture_d, 0, NULL, raster->atlas_pixels, raster->atlas_width * 4, 0);
+        return;
+    }
 }
 
 void
@@ -575,7 +598,8 @@ dx11_renderer_flush(Dx11Renderer *renderer)
     ID3D11DeviceContext_RSSetState(renderer->context, renderer->rasterizer);
     ID3D11DeviceContext_OMSetBlendState(renderer->context, renderer->blend_state, NULL, 0xffffffffu);
     ID3D11SamplerState *ps_sampler = renderer->sampler;
-    if (renderer->pending_text_srv == renderer->atlas_srv || renderer->pending_text_srv == renderer->atlas_srv_b) {
+    if (renderer->pending_text_srv == renderer->atlas_srv || renderer->pending_text_srv == renderer->atlas_srv_b ||
+        renderer->pending_text_srv == renderer->atlas_srv_c || renderer->pending_text_srv == renderer->atlas_srv_d) {
         ps_sampler = renderer->sampler_font;
     }
     ID3D11DeviceContext_PSSetSamplers(renderer->context, 0, 1, &ps_sampler);
@@ -591,7 +615,8 @@ dx11_renderer_flush(Dx11Renderer *renderer)
     constants.text_alpha_gamma = renderer->text_alpha_gamma;
     constants.text_gamma_blend = renderer->text_gamma_blend;
     constants.font_atlas_active = 0.0f;
-    if (renderer->pending_text_srv == renderer->atlas_srv || renderer->pending_text_srv == renderer->atlas_srv_b) {
+    if (renderer->pending_text_srv == renderer->atlas_srv || renderer->pending_text_srv == renderer->atlas_srv_b ||
+        renderer->pending_text_srv == renderer->atlas_srv_c || renderer->pending_text_srv == renderer->atlas_srv_d) {
         constants.font_atlas_active = 1.0f;
     }
     constants.text_render_mode = (f32)renderer->text_render_mode;
