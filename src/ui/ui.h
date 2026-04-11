@@ -122,6 +122,8 @@ void ui_drawlist_begin(UiDrawList *list, Arena *arena, u32 capacity);
 bool ui_draw_rect(UiDrawList *list, UiRect rect, RenderColor color);
 bool ui_draw_text(UiDrawList *list, f32 x, f32 baseline_y, const char *text, RenderColor color);
 bool ui_draw_text_font(UiDrawList *list, f32 x, f32 baseline_y, const char *text, RenderColor color, struct KbTextSystem *font);
+bool ui_draw_text_font_clamped(UiDrawList *list, f32 x, f32 baseline_y, const char *text, RenderColor color, struct KbTextSystem *font,
+                               f32 max_width);
 bool ui_draw_text_clamped(UiDrawList *list, f32 x, f32 baseline_y, const char *text, RenderColor color, f32 max_width);
 bool ui_draw_image(UiDrawList *list, UiRect rect, void *texture_srv, RenderColor tint);
 
@@ -144,6 +146,10 @@ void ui_control_text_input(UiDrawList *list,
 void ui_control_footer(UiDrawList *list, UiRect bounds, const char *text, RenderColor color, struct KbTextSystem *font);
 void ui_control_results_row(UiDrawList *list, UiRect bounds, bool selected, RenderColor selected_bg);
 void ui_control_scrollbar(UiDrawList *list, const UiScrollbarControl *scrollbar, RenderColor track_color, RenderColor thumb_color);
+
+f32 ui_shortcut_lnk_badge_chip_width(Arena *arena, struct KbTextSystem *font, f32 dpi_scale, const char *label);
+void ui_control_shortcut_lnk_badge(UiDrawList *list, Arena *arena, struct KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height,
+                                   f32 dpi_scale, const char *label, RenderColor chip_bg, RenderColor label_fg);
 UiHBoxLayout ui_hbox_begin(UiRect bounds, f32 gap);
 UiRect ui_hbox_next_fixed(UiHBoxLayout *layout, f32 width);
 UiRect ui_hbox_next_fill(UiHBoxLayout *layout, f32 min_width);

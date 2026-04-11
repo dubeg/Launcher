@@ -13,6 +13,8 @@ typedef struct IconWorkerRequest {
     s32 icon_index;
     s32 icon_size;
     wchar_t path[ICON_WORKER_PATH_CAPACITY];
+    wchar_t path_fallback[ICON_WORKER_PATH_CAPACITY];
+    s32 icon_index_fallback;
 } IconWorkerRequest;
 
 typedef struct IconWorkerResult {

@@ -31,7 +31,7 @@
 #define LAUNCHER_DEFAULT_VISIBLE_ROWS 10
 #define LAUNCHER_MIN_VISIBLE_ROWS 1
 #define LAUNCHER_MAX_VISIBLE_ROWS 50
-#define LAUNCHER_ICON_SIZE_PX 20
+#define LAUNCHER_ICON_SIZE_PX 24
 #define LAUNCHER_ICON_CACHE_CAPACITY 512
 #define LAUNCHER_ICON_QUEUE_CAPACITY 1024
 
@@ -259,6 +259,190 @@ app_query_word_right(AppState *app, s32 from)
         ++i;
     }
     return i;
+}
+
+static size_t
+utf8_clamped_byte_len(const char *utf8, size_t max_bytes)
+{
+    size_t i = 0;
+    while (i < max_bytes && utf8[i]) {
+        unsigned char c = (unsigned char)utf8[i];
+        size_t n = 1;
+        if ((c & 0x80) == 0) {
+            n = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            n = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            n = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            n = 4;
+        } else {
+            ++i;
+            continue;
+        }
+        if (i + n > max_bytes) {
+            break;
+        }
+        i += n;
+    }
+    return i;
+}
+
+static bool
+app_clipboard_set_utf8(HWND hwnd, const char *utf8, s32 byte_len)
+{
+    if (!utf8) {
+        utf8 = "";
+    }
+    if (byte_len < 0) {
+        byte_len = (s32)strlen(utf8);
+    }
+
+    int wide_count = 0;
+    if (byte_len > 0) {
+        wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, byte_len, NULL, 0);
+        if (wide_count <= 0) {
+            wide_count = MultiByteToWideChar(CP_UTF8, 0, utf8, byte_len, NULL, 0);
+        }
+    }
+    if (wide_count < 0) {
+        wide_count = 0;
+    }
+
+    SIZE_T alloc_bytes = ((SIZE_T)wide_count + 1) * sizeof(wchar_t);
+    HGLOBAL h_mem = GlobalAlloc(GMEM_MOVEABLE, alloc_bytes);
+    if (!h_mem) {
+        return false;
+    }
+    wchar_t *dst = (wchar_t *)GlobalLock(h_mem);
+    if (!dst) {
+        GlobalFree(h_mem);
+        return false;
+    }
+    if (wide_count > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, utf8, byte_len, dst, wide_count);
+    }
+    dst[wide_count] = 0;
+    GlobalUnlock(h_mem);
+
+    if (!OpenClipboard(hwnd)) {
+        GlobalFree(h_mem);
+        return false;
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, h_mem)) {
+        GlobalFree(h_mem);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
+static bool
+app_clipboard_get_utf8(HWND hwnd, Arena *arena, const char **out_utf8)
+{
+    if (!out_utf8) {
+        return false;
+    }
+    *out_utf8 = NULL;
+    if (!OpenClipboard(hwnd)) {
+        return false;
+    }
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    if (!h) {
+        CloseClipboard();
+        return false;
+    }
+    wchar_t *w = (wchar_t *)GlobalLock(h);
+    if (!w) {
+        CloseClipboard();
+        return false;
+    }
+    char *utf8 = utf8_from_wide(arena, w);
+    GlobalUnlock(h);
+    CloseClipboard();
+    *out_utf8 = utf8;
+    return true;
+}
+
+static bool
+app_query_insert_utf8(AppState *app, const char *utf8)
+{
+    if (!utf8) {
+        return false;
+    }
+    size_t ins_len = strlen(utf8);
+    if (ins_len == 0) {
+        return true;
+    }
+
+    if (app_query_has_selection(app)) {
+        app_query_delete_selection(app);
+    }
+
+    s32 room = LAUNCHER_MAX_QUERY - 1 - app->query_length;
+    if (room <= 0) {
+        return false;
+    }
+
+    if ((s32)ins_len > room) {
+        ins_len = utf8_clamped_byte_len(utf8, (size_t)room);
+    }
+    if (ins_len == 0) {
+        return false;
+    }
+
+    memmove(app->query + app->query_caret + ins_len,
+            app->query + app->query_caret,
+            (size_t)(app->query_length - app->query_caret + 1));
+    memcpy(app->query + app->query_caret, utf8, ins_len);
+    app->query_length += (s32)ins_len;
+    app->query_caret += (s32)ins_len;
+    app->query_anchor = app->query_caret;
+    app->caret_blink_on = true;
+    app->caret_blink_tick_ms = GetTickCount();
+    return true;
+}
+
+static bool
+app_query_paste_from_clipboard(AppState *app)
+{
+    const char *text = NULL;
+    if (!app_clipboard_get_utf8(app->hwnd, &app->frame_arena, &text)) {
+        return false;
+    }
+    if (!text) {
+        return true;
+    }
+    return app_query_insert_utf8(app, text);
+}
+
+static bool
+app_query_copy_to_clipboard(AppState *app)
+{
+    if (!app_query_has_selection(app)) {
+        return false;
+    }
+    s32 start = 0;
+    s32 end = 0;
+    app_query_selection_bounds(app, &start, &end);
+    return app_clipboard_set_utf8(app->hwnd, app->query + start, end - start);
+}
+
+static bool
+app_query_cut_to_clipboard(AppState *app)
+{
+    if (!app_query_has_selection(app)) {
+        return false;
+    }
+    s32 start = 0;
+    s32 end = 0;
+    app_query_selection_bounds(app, &start, &end);
+    if (!app_clipboard_set_utf8(app->hwnd, app->query + start, end - start)) {
+        return false;
+    }
+    return app_query_delete_selection(app);
 }
 
 static void
@@ -760,6 +944,12 @@ app_request_item_icon(AppState *app, const LaunchItem *item)
             request.icon_size = 8;
         }
         wcsncpy_s(request.path, array_count(request.path), entry->path, _TRUNCATE);
+        if (item->icon_fallback_path && item->icon_fallback_path[0]) {
+            wcsncpy_s(request.path_fallback, array_count(request.path_fallback), item->icon_fallback_path, _TRUNCATE);
+            request.icon_index_fallback = item->icon_fallback_index;
+        } else {
+            request.path_fallback[0] = 0;
+        }
         if (icon_worker_submit(&app->icon_worker, &request)) {
             entry->state = AppIconState_Queued;
         } else {
@@ -1103,6 +1293,10 @@ app_render(AppState *app)
     if (end_index > (s32)app->results.count) {
         end_index = (s32)app->results.count;
     }
+    const char *shortcut_lnk_label = "LNK";
+    f32 shortcut_lnk_chip_w = ui_shortcut_lnk_badge_chip_width(&app->frame_arena, &app->text_results, s, shortcut_lnk_label);
+    const f32 shortcut_lnk_gap = 6.0f * s;
+    const f32 shortcut_lnk_right_inset = 8.0f * s;
     for (s32 i = start_index; i < end_index; ++i) {
         bool selected = (i == app->selected_index);
         bool hover = (i == app->hover_result_index);
@@ -1128,9 +1322,35 @@ app_render(AppState *app)
         }
         f32 title_baseline = row_top + app->text_results.pixel_height + 2.0f * s;
         f32 subtitle_baseline = title_baseline + app->text_results.line_height;
-        ui_draw_text_font(&draw_list, item_text_x, title_baseline, item->display_name, theme.fg_primary, &app->text_results);
+        f32 row_text_right = content_right - shortcut_lnk_right_inset;
+        f32 title_max_w = row_text_right - item_text_x;
+        if (item->source == LaunchSource_StartMenuShortcut) {
+            title_max_w = row_text_right - shortcut_lnk_chip_w - shortcut_lnk_gap - item_text_x;
+            if (title_max_w < 24.0f * s) {
+                title_max_w = 24.0f * s;
+            }
+        }
+        ui_draw_text_font_clamped(&draw_list, item_text_x, title_baseline, item->display_name, theme.fg_primary, &app->text_results,
+                                  title_max_w);
+        RenderColor path_fg = theme.fg_secondary;
+        if (selected || hover) {
+            path_fg = theme.mode_pill_fg;
+        }
         if (item->subtitle) {
-            ui_draw_text_font(&draw_list, item_text_x, subtitle_baseline, item->subtitle, theme.fg_secondary, &app->text_results);
+            ui_draw_text_font_clamped(&draw_list, item_text_x, subtitle_baseline, item->subtitle, path_fg, &app->text_results,
+                                      title_max_w);
+        }
+        if (item->source == LaunchSource_StartMenuShortcut) {
+            ui_control_shortcut_lnk_badge(&draw_list,
+                                          &app->frame_arena,
+                                          &app->text_results,
+                                          content_right - shortcut_lnk_right_inset,
+                                          row_top,
+                                          row_height,
+                                          s,
+                                          shortcut_lnk_label,
+                                          (RenderColor){0.0f, 0.0f, 0.0f, 0.0f},
+                                          path_fg);
         }
         row_top += row_step;
     }
@@ -1271,6 +1491,27 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (ctrl_down) {
                     app->query_anchor = 0;
                     app_query_set_caret(app, app->query_length, true);
+                } else {
+                    handled = false;
+                }
+                break;
+            case 'C':
+                if (ctrl_down) {
+                    (void)app_query_copy_to_clipboard(app);
+                } else {
+                    handled = false;
+                }
+                break;
+            case 'V':
+                if (ctrl_down) {
+                    query_changed = app_query_paste_from_clipboard(app);
+                } else {
+                    handled = false;
+                }
+                break;
+            case 'X':
+                if (ctrl_down) {
+                    query_changed = app_query_cut_to_clipboard(app);
                 } else {
                     handled = false;
                 }

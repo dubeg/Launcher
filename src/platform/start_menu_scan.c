@@ -19,6 +19,18 @@ typedef struct TempItemList {
 } TempItemList;
 
 static void
+strip_dots_lnk_suffix_utf8(char *s)
+{
+    if (!s) {
+        return;
+    }
+    size_t n = strlen(s);
+    if (n >= 4 && _stricmp(s + n - 4, ".lnk") == 0) {
+        s[n - 4] = 0;
+    }
+}
+
+static void
 push_temp_item(TempItemList *list, const LaunchItem *item)
 {
     if (list->count >= list->capacity) {
@@ -30,11 +42,19 @@ push_temp_item(TempItemList *list, const LaunchItem *item)
 }
 
 static bool
-resolve_shortcut(const wchar_t *shortcut_path, wchar_t *target, size_t target_count, wchar_t *args, size_t args_count)
+resolve_shortcut(const wchar_t *shortcut_path, wchar_t *target, size_t target_count, wchar_t *args, size_t args_count,
+                   wchar_t *icon_location, size_t icon_location_count, int *icon_index_out)
 {
     IShellLinkW *shell_link = NULL;
     IPersistFile *persist = NULL;
     bool ok = false;
+
+    if (icon_location && icon_location_count > 0) {
+        icon_location[0] = 0;
+    }
+    if (icon_index_out) {
+        *icon_index_out = 0;
+    }
 
     if (FAILED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&shell_link))) {
         return false;
@@ -47,6 +67,14 @@ resolve_shortcut(const wchar_t *shortcut_path, wchar_t *target, size_t target_co
         SUCCEEDED(IShellLinkW_GetPath(shell_link, target, (int)target_count, NULL, SLGP_RAWPATH))) {
         IShellLinkW_GetArguments(shell_link, args, (int)args_count);
         ok = target[0] != 0;
+        if (ok && icon_location && icon_location_count > 0) {
+            int idx = 0;
+            if (SUCCEEDED(IShellLinkW_GetIconLocation(shell_link, icon_location, (int)icon_location_count, &idx))) {
+                if (icon_index_out) {
+                    *icon_index_out = idx;
+                }
+            }
+        }
     }
 
     IPersistFile_Release(persist);
@@ -97,7 +125,7 @@ append_direct_program_file(Arena *arena, TempItemList *list, const wchar_t *file
 
     char *shell_display = NULL;
     char *display_final = NULL;
-    const char *alias_name = catalog_aliases_lookup_msc_cpl(aliases, exe_key);
+    const char *alias_name = catalog_aliases_lookup_filename(aliases, exe_key);
     if (alias_name) {
         display_final = arena_strdup(arena, alias_name);
     } else if (shell_try_item_display_name_utf8(arena, NULL, file_path, &shell_display) && shell_display) {
@@ -127,7 +155,10 @@ append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
 {
     wchar_t target[MAX_PATH * 4] = {0};
     wchar_t arguments[512] = {0};
-    if (!resolve_shortcut(shortcut_path, target, array_count(target), arguments, array_count(arguments))) {
+    wchar_t link_icon_location[MAX_PATH * 4] = {0};
+    int link_icon_index = 0;
+    if (!resolve_shortcut(shortcut_path, target, array_count(target), arguments, array_count(arguments), link_icon_location,
+                          array_count(link_icon_location), &link_icon_index)) {
         return;
     }
     if (!shortcut_link_target_allowed(target)) {
@@ -151,6 +182,7 @@ append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
             *dot = 0;
         }
     }
+    strip_dots_lnk_suffix_utf8(display_final);
 
     size_t search_size = strlen(display_final) + 1 + strlen(exe_key) + 1;
     char *combined = (char *)arena_push_zero(arena, search_size, 1);
@@ -159,12 +191,21 @@ append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
 
     LaunchItem item = {0};
     item.mode = SearchMode_Apps;
-    item.source = LaunchSource_StartMenu;
+    item.source = LaunchSource_StartMenuShortcut;
     item.display_name = display_final;
     item.search_text = arena_strdup(arena, combined);
     item.subtitle = arena_strdup(arena, target_utf8);
     item.launch_path = arena_wcsdup(arena, target);
     item.arguments = arguments[0] ? arena_wcsdup(arena, arguments) : NULL;
+    if (link_icon_location[0]) {
+        item.icon_path = arena_wcsdup(arena, link_icon_location);
+        item.icon_index = (s32)link_icon_index;
+    } else {
+        item.icon_path = arena_wcsdup(arena, shortcut_path);
+        item.icon_index = -1;
+    }
+    item.icon_fallback_path = arena_wcsdup(arena, target);
+    item.icon_fallback_index = -1;
     push_temp_item(list, &item);
 }
 

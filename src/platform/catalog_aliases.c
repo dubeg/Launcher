@@ -3,16 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-static bool
-filename_utf8_is_msc_or_cpl(const char *name)
-{
-    const char *dot = strrchr(name, '.');
-    if (!dot) {
-        return false;
-    }
-    return _stricmp(dot, ".msc") == 0 || _stricmp(dot, ".cpl") == 0;
-}
-
 void
 catalog_aliases_load_json(Arena *arena, const wchar_t *path, CatalogAliases *out)
 {
@@ -69,9 +59,9 @@ catalog_aliases_load_json(Arena *arena, const wchar_t *path, CatalogAliases *out
 }
 
 const char *
-catalog_aliases_lookup_msc_cpl(const CatalogAliases *aliases, const char *filename_lower_utf8)
+catalog_aliases_lookup_filename(const CatalogAliases *aliases, const char *filename_lower_utf8)
 {
-    if (!aliases || !aliases->count || !filename_lower_utf8 || !filename_utf8_is_msc_or_cpl(filename_lower_utf8)) {
+    if (!aliases || !aliases->count || !filename_lower_utf8 || !filename_lower_utf8[0]) {
         return NULL;
     }
     for (u32 i = 0; i < aliases->count; ++i) {

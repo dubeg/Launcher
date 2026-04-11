@@ -96,7 +96,7 @@ append_directory_as_app(Arena *arena, TempItemList *list, const wchar_t *directo
 
             char *shell_display = NULL;
             char *display_final = NULL;
-            const char *alias_name = catalog_aliases_lookup_msc_cpl(aliases, exe_name);
+            const char *alias_name = catalog_aliases_lookup_filename(aliases, exe_name);
             if (alias_name) {
                 display_final = arena_strdup(arena, alias_name);
             } else if (shell_try_item_display_name_utf8(arena, NULL, full_path, &shell_display) && shell_display) {

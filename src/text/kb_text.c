@@ -122,6 +122,16 @@ kb_text_shape(Arena *arena, KbTextSystem *text, const char *utf8, f32 x, f32 bas
     return shaped;
 }
 
+f32
+kb_text_measure_utf8_width(Arena *arena, KbTextSystem *text, const char *utf8)
+{
+    if (!arena || !text || !utf8 || !utf8[0]) {
+        return 0.0f;
+    }
+    ShapedText shaped = kb_text_shape(arena, text, utf8, 0.0f, 0.0f);
+    return shaped.width;
+}
+
 void
 kb_text_snap_shaped_quads_to_pixels(ShapedText *shaped)
 {

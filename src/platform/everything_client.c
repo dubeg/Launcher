@@ -53,7 +53,7 @@ everything_query_files(Arena *arena, const char *query_utf8, u32 max_results, co
         char file_key[260];
         strcpy_s(file_key, sizeof(file_key), file_name);
         lowercase_ascii_in_place(file_key);
-        const char *alias_title = catalog_aliases_lookup_msc_cpl(aliases, file_key);
+        const char *alias_title = catalog_aliases_lookup_filename(aliases, file_key);
         char *search_text = NULL;
         if (alias_title) {
             size_t st_len = strlen(full_path_utf8) + 1 + strlen(alias_title) + 1 + strlen(file_name) + 1;

@@ -19,6 +19,7 @@ typedef enum LaunchSource {
     LaunchSource_System32 = 1,
     LaunchSource_ExtraPath = 2,
     LaunchSource_Everything = 3,
+    LaunchSource_StartMenuShortcut = 4,
 } LaunchSource;
 
 typedef struct LaunchItem {
@@ -31,6 +32,8 @@ typedef struct LaunchItem {
     wchar_t *arguments;
     wchar_t *icon_path;
     s32 icon_index;
+    wchar_t *icon_fallback_path;
+    s32 icon_fallback_index;
 } LaunchItem;
 
 typedef struct LaunchItemArray {

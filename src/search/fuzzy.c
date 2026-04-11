@@ -73,7 +73,7 @@ fuzzy_rank_items(Arena *arena, const char *query, const LaunchItem *items, u32 i
             candidate.score = 0.0;
         }
 
-        if (item->source == LaunchSource_StartMenu) {
+        if (item->source == LaunchSource_StartMenu || item->source == LaunchSource_StartMenuShortcut) {
             candidate.score += 0.25;
         }
         if (item->source == LaunchSource_System32) {

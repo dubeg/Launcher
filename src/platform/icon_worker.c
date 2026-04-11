@@ -314,6 +314,10 @@ icon_worker_thread_proc(void *param)
         result.generation = request.generation;
         result.success = extract_shell_icon_rgba(request.path, request.icon_index, request.icon_size,
                                                  &result.pixels, &result.width, &result.height, &result.stride);
+        if (!result.success && request.path_fallback[0]) {
+            result.success = extract_shell_icon_rgba(request.path_fallback, request.icon_index_fallback, request.icon_size,
+                                                     &result.pixels, &result.width, &result.height, &result.stride);
+        }
 
         EnterCriticalSection(&worker->lock);
         s32 next_write = (worker->done_write + 1) % ICON_WORKER_COMPLETED_CAPACITY;

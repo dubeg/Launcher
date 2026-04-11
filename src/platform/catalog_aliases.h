@@ -15,7 +15,7 @@ typedef struct CatalogAliases {
 
 void catalog_aliases_load_json(Arena *arena, const wchar_t *path, CatalogAliases *out);
 
-/* Friendly name from system_aliases.json only for direct .msc / .cpl files (not .lnk shortcuts). */
-const char *catalog_aliases_lookup_msc_cpl(const CatalogAliases *aliases, const char *filename_lower_utf8);
+/* Friendly name when JSON key matches the file leaf name (not used for .lnk shortcut rows). */
+const char *catalog_aliases_lookup_filename(const CatalogAliases *aliases, const char *filename_lower_utf8);
 
 #endif
