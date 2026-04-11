@@ -123,13 +123,10 @@ append_direct_program_file(Arena *arena, TempItemList *list, const wchar_t *file
     strcpy_s(exe_key, sizeof(exe_key), path_filename_utf8(path_utf8));
     lowercase_ascii_in_place(exe_key);
 
-    char *shell_display = NULL;
     char *display_final = NULL;
     const char *alias_name = catalog_aliases_lookup_filename(aliases, exe_key);
     if (alias_name) {
         display_final = arena_strdup(arena, alias_name);
-    } else if (shell_try_item_display_name_utf8(arena, NULL, file_path, &shell_display) && shell_display) {
-        display_final = arena_strdup(arena, shell_display);
     } else {
         display_final = arena_strdup(arena, search_base);
     }
@@ -196,6 +193,7 @@ append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
     item.search_text = arena_strdup(arena, combined);
     item.subtitle = arena_strdup(arena, target_utf8);
     item.launch_path = arena_wcsdup(arena, target);
+    item.shortcut_path = arena_wcsdup(arena, shortcut_path);
     item.arguments = arguments[0] ? arena_wcsdup(arena, arguments) : NULL;
     if (link_icon_location[0]) {
         item.icon_path = arena_wcsdup(arena, link_icon_location);

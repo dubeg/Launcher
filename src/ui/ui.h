@@ -161,8 +161,11 @@ void ui_control_context_menu_item(UiDrawList *list,
                                   void *icon_texture_srv);
 
 f32 ui_shortcut_lnk_badge_chip_width(Arena *arena, struct KbTextSystem *font, f32 dpi_scale, const char *label);
+UiRect ui_shortcut_lnk_badge_bounds(Arena *arena, struct KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height, f32 dpi_scale,
+                                    const char *label);
 void ui_control_shortcut_lnk_badge(UiDrawList *list, Arena *arena, struct KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height,
-                                   f32 dpi_scale, const char *label, RenderColor chip_bg, RenderColor label_fg);
+                                   f32 dpi_scale, const char *label, bool hover, RenderColor chip_bg, RenderColor label_fg,
+                                   RenderColor chip_bg_hover, RenderColor label_fg_hover);
 UiHBoxLayout ui_hbox_begin(UiRect bounds, f32 gap);
 UiRect ui_hbox_next_fixed(UiHBoxLayout *layout, f32 width);
 UiRect ui_hbox_next_fill(UiHBoxLayout *layout, f32 min_width);

@@ -139,3 +139,32 @@ platform_open_file_location(const LaunchItem *item)
     }
     return ShellExecuteExW(&info) == TRUE;
 }
+
+bool
+platform_show_file_properties(HWND owner, const wchar_t *path)
+{
+    if (!path || !path[0]) {
+        return false;
+    }
+
+    SHELLEXECUTEINFOW info;
+    ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.hwnd = owner;
+    info.fMask = SEE_MASK_INVOKEIDLIST;
+    info.lpVerb = L"properties";
+    info.lpFile = path;
+    info.nShow = SW_SHOW;
+    if (ShellExecuteExW(&info)) {
+        return true;
+    }
+
+    ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.hwnd = owner;
+    info.fMask = SEE_MASK_NOASYNC;
+    info.lpVerb = L"properties";
+    info.lpFile = path;
+    info.nShow = SW_SHOW;
+    return ShellExecuteExW(&info) == TRUE;
+}

@@ -1,11 +1,12 @@
 #include "catalog.h"
 
 #include "catalog_aliases.h"
-#include "shell_display_name.h"
 #include "start_menu_scan.h"
 #include "system32_catalog.h"
 #include "../core/base.h"
 
+#include <knownfolders.h>
+#include <shlobj.h>
 #include <shlwapi.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,8 +17,8 @@
 #define EXTRA_PATH_RECURSIVE_MAX_ITEMS 40000
 
 /* Exe often lives in build\Debug while data\ is at repo root — walk up until relative path exists. */
-static bool
-catalog_resolve_existing_file(const wchar_t *start_dir, const wchar_t *relative_path, wchar_t *out, size_t out_cap_chars)
+bool
+catalog_resolve_install_relative(const wchar_t *start_dir, const wchar_t *relative_path, wchar_t *out, size_t out_cap_chars)
 {
     wchar_t base[MAX_PATH * 4];
     if (wcscpy_s(base, array_count(base), start_dir) != 0) {
@@ -86,20 +87,20 @@ extension_is_extra_program(const wchar_t *ext)
 static void
 push_extra_path_item(Arena *arena, TempItemList *list, const wchar_t *full_path, const wchar_t *file_name, const CatalogAliases *aliases)
 {
-    char exe_name[260];
-    utf8_from_wide_buffer(file_name, exe_name, array_count(exe_name));
-    lowercase_ascii_in_place(exe_name);
+    char file_utf8[520];
+    utf8_from_wide_buffer(file_name, file_utf8, array_count(file_utf8));
 
-    char *shell_display = NULL;
+    char exe_key[260];
+    strcpy_s(exe_key, sizeof(exe_key), file_utf8);
+    lowercase_ascii_in_place(exe_key);
+
     char *display_final = NULL;
-    const char *alias_name = catalog_aliases_lookup_filename(aliases, exe_name);
+    const char *alias_name = catalog_aliases_lookup_filename(aliases, exe_key);
     if (alias_name) {
         display_final = arena_strdup(arena, alias_name);
-    } else if (shell_try_item_display_name_utf8(arena, NULL, full_path, &shell_display) && shell_display) {
-        display_final = arena_strdup(arena, shell_display);
     } else {
-        char stem[260];
-        strcpy_s(stem, sizeof(stem), exe_name);
+        char stem[520];
+        strcpy_s(stem, sizeof(stem), file_utf8);
         char *dot = strrchr(stem, '.');
         if (dot) {
             *dot = 0;
@@ -107,9 +108,9 @@ push_extra_path_item(Arena *arena, TempItemList *list, const wchar_t *full_path,
         display_final = arena_strdup(arena, stem);
     }
 
-    size_t st_len = strlen(display_final) + 1 + strlen(exe_name) + 1;
+    size_t st_len = strlen(display_final) + 1 + strlen(exe_key) + 1;
     char *search_combined = (char *)arena_push_zero(arena, st_len, 1);
-    _snprintf_s(search_combined, st_len, _TRUNCATE, "%s %s", display_final, exe_name);
+    _snprintf_s(search_combined, st_len, _TRUNCATE, "%s %s", display_final, exe_key);
     lowercase_ascii_in_place(search_combined);
 
     LaunchItem item = {0};
@@ -542,6 +543,183 @@ parse_locations_json(Arena *arena, TempItemList *list, const wchar_t *path, cons
     free_file_data(&file);
 }
 
+static wchar_t *
+heap_wcsdup_catalog(const wchar_t *s)
+{
+    if (!s) {
+        return NULL;
+    }
+    size_t n = (wcslen(s) + 1u) * sizeof(wchar_t);
+    wchar_t *p = (wchar_t *)heap_alloc_zero(n);
+    if (p) {
+        memcpy(p, s, n);
+    }
+    return p;
+}
+
+static void
+catalog_watch_roots_push_unique(CatalogWatchRootDirs *roots, const wchar_t *path)
+{
+    if (!roots || !path || !path[0]) {
+        return;
+    }
+    DWORD attr = GetFileAttributesW(path);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return;
+    }
+    for (u32 i = 0; i < roots->count; ++i) {
+        if (roots->paths[i] && _wcsicmp(roots->paths[i], path) == 0) {
+            return;
+        }
+    }
+    wchar_t **next = (wchar_t **)heap_realloc(roots->paths, sizeof(wchar_t *) * ((size_t)roots->count + 1u));
+    if (!next) {
+        return;
+    }
+    roots->paths = next;
+    wchar_t *copy = heap_wcsdup_catalog(path);
+    if (!copy) {
+        return;
+    }
+    roots->paths[roots->count++] = copy;
+}
+
+static void
+watch_append_locations_json_roots(CatalogWatchRootDirs *roots, const wchar_t *json_path)
+{
+    FileData file = read_entire_file_wide(json_path);
+    if (!file.data) {
+        return;
+    }
+
+    Arena scratch = arena_create(megabytes(1), kilobytes(64));
+    char *text = loc_json_skip_utf8_bom((char *)file.data);
+    char *p = loc_json_find_paths_array(text);
+    if (!p) {
+        if (file.size > 0) {
+            debug_log_wide(L"locations.json: no \"paths\" array (file=%ls)", json_path);
+        }
+        arena_destroy(&scratch);
+        free_file_data(&file);
+        return;
+    }
+
+    bool malformed = false;
+    for (;;) {
+        skip_json_ws(&p);
+        if (*p == ']') {
+            p++;
+            break;
+        }
+        if (*p == 0) {
+            malformed = true;
+            break;
+        }
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+
+        char *path_utf8 = NULL;
+        bool recursive = false;
+        if (*p == '"') {
+            if (!parse_json_string_content(&p, &scratch, &path_utf8)) {
+                malformed = true;
+                break;
+            }
+        } else if (*p == '{') {
+            if (!parse_locations_path_object(&p, &scratch, &path_utf8, &recursive)) {
+                malformed = true;
+                break;
+            }
+        } else {
+            malformed = true;
+            break;
+        }
+
+        if (is_windows_path_utf8(path_utf8)) {
+            wchar_t *wdir = wide_from_utf8(&scratch, path_utf8);
+            catalog_watch_roots_push_unique(roots, wdir);
+        }
+
+        skip_json_ws(&p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == ']') {
+            p++;
+            break;
+        }
+        if (*p == 0) {
+            malformed = true;
+            break;
+        }
+        malformed = true;
+        break;
+    }
+
+    if (malformed) {
+        debug_log_wide(L"locations.json: parse error (file=%ls)", json_path);
+    }
+
+    arena_destroy(&scratch);
+    free_file_data(&file);
+}
+
+bool
+catalog_watch_root_dirs_collect(const wchar_t *install_dir, CatalogWatchRootDirs *out)
+{
+    if (!out) {
+        return false;
+    }
+    ZeroMemory(out, sizeof(*out));
+
+    PWSTR kf = NULL;
+    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_Programs, 0, NULL, &kf))) {
+        catalog_watch_roots_push_unique(out, kf);
+        CoTaskMemFree(kf);
+        kf = NULL;
+    }
+    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_CommonPrograms, 0, NULL, &kf))) {
+        catalog_watch_roots_push_unique(out, kf);
+        CoTaskMemFree(kf);
+        kf = NULL;
+    }
+
+    wchar_t win_dir[MAX_PATH];
+    UINT wlen = GetWindowsDirectoryW(win_dir, array_count(win_dir));
+    if (wlen > 0 && wlen < array_count(win_dir)) {
+        catalog_watch_roots_push_unique(out, win_dir);
+    }
+    wchar_t sys_dir[MAX_PATH];
+    UINT slen = GetSystemDirectoryW(sys_dir, array_count(sys_dir));
+    if (slen > 0 && slen < array_count(sys_dir)) {
+        catalog_watch_roots_push_unique(out, sys_dir);
+    }
+
+    wchar_t config_path[MAX_PATH * 4];
+    if (catalog_resolve_install_relative(install_dir, L"config\\locations.json", config_path, array_count(config_path))) {
+        watch_append_locations_json_roots(out, config_path);
+    }
+
+    return true;
+}
+
+void
+catalog_watch_root_dirs_free(CatalogWatchRootDirs *dirs)
+{
+    if (!dirs) {
+        return;
+    }
+    for (u32 i = 0; i < dirs->count; ++i) {
+        heap_free(dirs->paths[i]);
+    }
+    heap_free(dirs->paths);
+    dirs->paths = NULL;
+    dirs->count = 0;
+}
+
 bool
 app_catalog_build(Arena *arena, const wchar_t *install_dir, LaunchItemArray *out_items, CatalogAliases *out_aliases)
 {
@@ -550,7 +728,7 @@ app_catalog_build(Arena *arena, const wchar_t *install_dir, LaunchItemArray *out
     LaunchItemArray system32 = {0};
 
     wchar_t alias_path[MAX_PATH * 4];
-    if (!catalog_resolve_existing_file(install_dir, L"data\\system_aliases.json", alias_path, array_count(alias_path))) {
+    if (!catalog_resolve_install_relative(install_dir, L"data\\system_aliases.json", alias_path, array_count(alias_path))) {
         alias_path[0] = 0;
     }
     CatalogAliases aliases = {0};
@@ -568,7 +746,7 @@ app_catalog_build(Arena *arena, const wchar_t *install_dir, LaunchItemArray *out
     append_items(&merged, &system32);
 
     wchar_t config_path[MAX_PATH * 4];
-    if (catalog_resolve_existing_file(install_dir, L"config\\locations.json", config_path, array_count(config_path))) {
+    if (catalog_resolve_install_relative(install_dir, L"config\\locations.json", config_path, array_count(config_path))) {
         parse_locations_json(arena, &merged, config_path, &aliases);
     }
 

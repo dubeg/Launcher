@@ -29,6 +29,8 @@ typedef struct LaunchItem {
     char *search_text;
     char *subtitle;
     wchar_t *launch_path;
+    /* Full path to the .lnk when source is LaunchSource_StartMenuShortcut; NULL otherwise. */
+    wchar_t *shortcut_path;
     wchar_t *arguments;
     wchar_t *icon_path;
     s32 icon_index;

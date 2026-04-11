@@ -522,11 +522,12 @@ ui_shortcut_lnk_badge_chip_width(Arena *arena, KbTextSystem *font, f32 dpi_scale
     return text_w + 2.0f * ui_shortcut_lnk_badge_pad_x(dpi_scale);
 }
 
-void
-ui_control_shortcut_lnk_badge(UiDrawList *list, Arena *arena, KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height,
-                              f32 dpi_scale, const char *label, RenderColor chip_bg, RenderColor label_fg)
+static void
+ui_shortcut_lnk_badge_layout(Arena *arena, KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height, f32 dpi_scale,
+                             const char *label, f32 *out_chip_x, f32 *out_chip_y, f32 *out_chip_w, f32 *out_chip_h, f32 *out_pad_x)
 {
-    if (!list || !arena || !font || !label || !label[0] || row_height <= 0.0f) {
+    if (!arena || !font || !label || !label[0] || row_height <= 0.0f) {
+        *out_chip_x = *out_chip_y = *out_chip_w = *out_chip_h = *out_pad_x = 0.0f;
         return;
     }
     f32 s = dpi_scale > 0.0f ? dpi_scale : 1.0f;
@@ -548,12 +549,43 @@ ui_control_shortcut_lnk_badge(UiDrawList *list, Arena *arena, KbTextSystem *font
     }
     f32 chip_x = right_edge_x - chip_w;
     f32 chip_y = row_top + (row_height - chip_h) * 0.5f;
-    if (chip_bg.a > 0.001f) {
-        ui_draw_rect(list, ui_rect(chip_x, chip_y, chip_w, chip_h), chip_bg);
+    *out_chip_x = chip_x;
+    *out_chip_y = chip_y;
+    *out_chip_w = chip_w;
+    *out_chip_h = chip_h;
+    *out_pad_x = pad_x;
+}
+
+UiRect
+ui_shortcut_lnk_badge_bounds(Arena *arena, KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height, f32 dpi_scale,
+                             const char *label)
+{
+    f32 chip_x, chip_y, chip_w, chip_h, pad_x;
+    ui_shortcut_lnk_badge_layout(arena, font, right_edge_x, row_top, row_height, dpi_scale, label, &chip_x, &chip_y, &chip_w, &chip_h,
+                                 &pad_x);
+    (void)pad_x;
+    return ui_rect(chip_x, chip_y, chip_w, chip_h);
+}
+
+void
+ui_control_shortcut_lnk_badge(UiDrawList *list, Arena *arena, KbTextSystem *font, f32 right_edge_x, f32 row_top, f32 row_height,
+                              f32 dpi_scale, const char *label, bool hover, RenderColor chip_bg, RenderColor label_fg,
+                              RenderColor chip_bg_hover, RenderColor label_fg_hover)
+{
+    if (!list || !arena || !font || !label || !label[0] || row_height <= 0.0f) {
+        return;
+    }
+    f32 chip_x, chip_y, chip_w, chip_h, pad_x;
+    ui_shortcut_lnk_badge_layout(arena, font, right_edge_x, row_top, row_height, dpi_scale, label, &chip_x, &chip_y, &chip_w, &chip_h,
+                                 &pad_x);
+    RenderColor fill = hover ? chip_bg_hover : chip_bg;
+    RenderColor fg = hover ? label_fg_hover : label_fg;
+    if (fill.a > 0.001f) {
+        ui_draw_rect(list, ui_rect(chip_x, chip_y, chip_w, chip_h), fill);
     }
     KbTextLineLayout layout;
     kb_text_line_layout_centered(font, chip_y, chip_h, &layout);
-    ui_draw_text_font(list, chip_x + pad_x, layout.baseline_y, label, label_fg, font);
+    ui_draw_text_font(list, chip_x + pad_x, layout.baseline_y, label, fg, font);
 }
 
 UiHBoxLayout

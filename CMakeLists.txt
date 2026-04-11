@@ -14,6 +14,7 @@ add_executable(launcher WIN32
     src/ui/ui.c
     src/ui/ctx_menu_icons.c
     src/platform/catalog.c
+    src/platform/catalog_watch.c
     src/platform/catalog_aliases.c
     src/platform/everything_client.c
     src/platform/icon_worker.c

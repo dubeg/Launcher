@@ -1,6 +1,5 @@
 #include "system32_catalog.h"
 #include "catalog_aliases.h"
-#include "shell_display_name.h"
 
 #include "../core/base.h"
 
@@ -50,24 +49,31 @@ append_windows_program_file(Arena *arena, TempItemList *list, const CatalogAlias
         return;
     }
 
-    char exe_name[260];
-    utf8_from_wide_buffer(file_name, exe_name, array_count(exe_name));
-    lowercase_ascii_in_place(exe_name);
+    char file_utf8[520];
+    utf8_from_wide_buffer(file_name, file_utf8, array_count(file_utf8));
 
-    char *shell_display = NULL;
-    const char *friendly = catalog_aliases_lookup_filename(aliases, exe_name);
+    char exe_key[260];
+    strcpy_s(exe_key, sizeof(exe_key), file_utf8);
+    lowercase_ascii_in_place(exe_key);
+
+    char stem[520];
+    strcpy_s(stem, sizeof(stem), file_utf8);
+    char *dot = strrchr(stem, '.');
+    if (dot) {
+        *dot = 0;
+    }
+
+    const char *friendly = catalog_aliases_lookup_filename(aliases, exe_key);
     const char *display = NULL;
     if (friendly) {
         display = friendly;
-    } else if (shell_try_item_display_name_utf8(arena, NULL, full_path, &shell_display) && shell_display) {
-        display = shell_display;
     } else {
-        display = exe_name;
+        display = stem;
     }
 
-    size_t search_size = strlen(display) + 1 + strlen(exe_name) + 1;
+    size_t search_size = strlen(display) + 1 + strlen(exe_key) + 1;
     char *search_text = (char *)arena_push_zero(arena, search_size, 1);
-    _snprintf_s(search_text, search_size, _TRUNCATE, "%s %s", display, exe_name);
+    _snprintf_s(search_text, search_size, _TRUNCATE, "%s %s", display, exe_key);
     lowercase_ascii_in_place(search_text);
 
     char *subtitle = utf8_from_wide(arena, full_path);

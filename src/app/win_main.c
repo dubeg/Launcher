@@ -3,6 +3,7 @@
 #include "../core/base.h"
 #include "../platform/catalog.h"
 #include "../platform/catalog_aliases.h"
+#include "../platform/catalog_watch.h"
 #include "../platform/everything_client.h"
 #include "../platform/icon_worker.h"
 #include "../platform/launch.h"
@@ -38,6 +39,7 @@
 #define LAUNCHER_ICON_CACHE_CAPACITY 512
 #define LAUNCHER_ICON_QUEUE_CAPACITY 1024
 #define LAUNCHER_CTX_FILTER_CAP 128
+#define IDT_CATALOG_FS_DEBOUNCE 3
 
 static const f32 k_debug_text_gamma_presets[] = {
     1.0f,
@@ -111,6 +113,7 @@ typedef struct AppState {
     bool everything_available;
     s32 selected_index;
     s32 hover_result_index;
+    s32 hover_lnk_chip_row;
     s32 results_top_index;
     s32 max_visible_rows;
     s32 query_length;
@@ -154,6 +157,7 @@ static s32 app_result_rows_per_page(AppState *app);
 static f32 app_results_row_step(AppState *app);
 static void app_scroll_results_list(AppState *app, s32 wheel_delta);
 static s32 app_hit_test_result_index(AppState *app, f32 mx, f32 my, u32 client_w, u32 client_h);
+static s32 app_hit_test_lnk_badge_row(AppState *app, f32 mx, f32 my, u32 client_w, u32 client_h);
 static void app_clamp_result_view(AppState *app);
 static void app_clamp_results_top_bounds(AppState *app);
 static void app_window_size_for_rows(AppState *app, s32 *out_width, s32 *out_height);
@@ -1158,6 +1162,7 @@ app_hide(AppState *app)
     app_ctx_menu_close(app);
     app->visible = false;
     app->hover_result_index = -1;
+    app->hover_lnk_chip_row = -1;
     debug_log_wide(L"app_hide");
     ShowWindow(app->hwnd, SW_HIDE);
 }
@@ -1182,6 +1187,9 @@ app_set_install_dir(AppState *app)
 static void
 app_init_catalog(AppState *app)
 {
+    if (app->catalog_arena.base) {
+        arena_destroy(&app->catalog_arena);
+    }
     app->catalog_arena = arena_create(gigabytes(1), megabytes(4));
     app_catalog_build(&app->catalog_arena, app->install_dir, &app->app_catalog, &app->catalog_aliases);
 }
@@ -1222,6 +1230,9 @@ app_refresh_results(AppState *app)
     app_clamp_result_view(app);
     if (app->results.count == 0 || app->hover_result_index >= (s32)app->results.count) {
         app->hover_result_index = -1;
+    }
+    if (app->results.count == 0 || app->hover_lnk_chip_row >= (s32)app->results.count) {
+        app->hover_lnk_chip_row = -1;
     }
 }
 
@@ -1378,6 +1389,43 @@ app_hit_test_result_index(AppState *app, f32 mx, f32 my, u32 client_w, u32 clien
         return -1;
     }
     return idx;
+}
+
+static s32
+app_hit_test_lnk_badge_row(AppState *app, f32 mx, f32 my, u32 client_w, u32 client_h)
+{
+    s32 row = app_hit_test_result_index(app, mx, my, client_w, client_h);
+    if (row < 0) {
+        return -1;
+    }
+    const LaunchItem *it = app->results.items[(u32)row].item;
+    if (it->source != LaunchSource_StartMenuShortcut || !it->shortcut_path || !it->shortcut_path[0]) {
+        return -1;
+    }
+    AppListGeometry g;
+    app_compute_list_geometry(app, client_w, client_h, &g);
+    s32 end_index = g.start_index + g.rows_per_page;
+    if (end_index > (s32)app->results.count) {
+        end_index = (s32)app->results.count;
+    }
+    if (row < g.start_index || row >= end_index) {
+        return -1;
+    }
+    f32 row_top = g.first_row_y + (f32)(row - g.start_index) * g.row_step;
+    f32 row_h = app_results_row_step(app);
+    f32 s = app->dpi_scale > 0.0f ? app->dpi_scale : 1.0f;
+    const f32 shortcut_lnk_right_inset = 8.0f * s;
+    ArenaTemp tmp = arena_temp_begin(&app->frame_arena);
+    UiRect chip = ui_shortcut_lnk_badge_bounds(&app->frame_arena, &app->text_results, g.content_right - shortcut_lnk_right_inset,
+                                               row_top, row_h, s, "LNK");
+    arena_temp_end(tmp);
+    if (chip.w <= 0.0f || chip.h <= 0.0f) {
+        return -1;
+    }
+    if (mx >= chip.x && mx < chip.x + chip.w && my >= chip.y && my < chip.y + chip.h) {
+        return row;
+    }
+    return -1;
 }
 
 static void
@@ -2033,6 +2081,7 @@ app_render(AppState *app)
                                       title_max_w);
         }
         if (item->source == LaunchSource_StartMenuShortcut) {
+            bool lnk_hot = (i == app->hover_lnk_chip_row);
             ui_control_shortcut_lnk_badge(&draw_list,
                                           &app->frame_arena,
                                           &app->text_results,
@@ -2041,8 +2090,11 @@ app_render(AppState *app)
                                           row_height,
                                           s,
                                           shortcut_lnk_label,
+                                          lnk_hot,
                                           (RenderColor){0.0f, 0.0f, 0.0f, 0.0f},
-                                          path_fg);
+                                          path_fg,
+                                          theme.mode_pill_bg,
+                                          theme.mode_pill_fg);
         }
         row_top += row_step;
     }
@@ -2174,6 +2226,18 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             app_toggle(app);
         }
         return 0;
+    case WM_LAUNCHER_CATALOG_FS_CHANGED:
+        if (app && hwnd) {
+            KillTimer(hwnd, IDT_CATALOG_FS_DEBOUNCE);
+            SetTimer(hwnd, IDT_CATALOG_FS_DEBOUNCE, 450, NULL);
+        }
+        return 0;
+    case WM_SETCURSOR:
+        if (app && app->visible && !app->ctx_open && LOWORD(lParam) == HTCLIENT && app->hover_lnk_chip_row >= 0) {
+            SetCursor(LoadCursorW(NULL, IDC_HAND));
+            return TRUE;
+        }
+        break;
     case WM_SIZE:
         if (app && app->renderer.device) {
             dx11_renderer_resize(&app->renderer, LOWORD(lParam), HIWORD(lParam));
@@ -2407,21 +2471,37 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     app->hover_result_index = -1;
                     inv = true;
                 }
+                if (app->hover_lnk_chip_row >= 0) {
+                    app->hover_lnk_chip_row = -1;
+                    inv = true;
+                }
                 if (inv) {
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
             } else {
-                s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, (u32)(cr.right - cr.left), (u32)(cr.bottom - cr.top));
+                u32 cw = (u32)(cr.right - cr.left);
+                u32 ch = (u32)(cr.bottom - cr.top);
+                s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, cw, ch);
+                s32 lnk_hit = app_hit_test_lnk_badge_row(app, (f32)mx, (f32)my, cw, ch);
+                bool inv = false;
                 if (hit != app->hover_result_index) {
                     app->hover_result_index = hit;
+                    inv = true;
+                }
+                if (lnk_hit != app->hover_lnk_chip_row) {
+                    app->hover_lnk_chip_row = lnk_hit;
+                    inv = true;
+                }
+                if (inv) {
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
             }
         }
         return 0;
     case WM_MOUSELEAVE:
-        if (app && app->visible && app->hover_result_index >= 0) {
+        if (app && app->visible && (app->hover_result_index >= 0 || app->hover_lnk_chip_row >= 0)) {
             app->hover_result_index = -1;
+            app->hover_lnk_chip_row = -1;
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -2475,6 +2555,15 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     return 0;
                 }
             }
+            s32 lnk_row = app_hit_test_lnk_badge_row(app, (f32)mx, (f32)my, cw, ch);
+            if (lnk_row >= 0) {
+                const LaunchItem *lnk_item = app->results.items[(u32)lnk_row].item;
+                if (lnk_item->shortcut_path && lnk_item->shortcut_path[0]) {
+                    platform_show_file_properties(hwnd, lnk_item->shortcut_path);
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
             s32 hit = app_hit_test_result_index(app, (f32)mx, (f32)my, cw, ch);
             if (hit >= 0) {
                 app->selected_index = hit;
@@ -2501,6 +2590,16 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
     case WM_TIMER:
+        if (wParam == IDT_CATALOG_FS_DEBOUNCE) {
+            KillTimer(hwnd, IDT_CATALOG_FS_DEBOUNCE);
+            if (app) {
+                app_init_catalog(app);
+                app_invalidate_icon_textures(app);
+                app_refresh_results(app);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        }
         if (app && app->visible) {
             u32 now = GetTickCount();
             if (now - app->caret_blink_tick_ms >= 530) {
@@ -2534,6 +2633,7 @@ app_init(AppState *app, HINSTANCE instance)
     app->mode = SearchMode_Apps;
     app->selected_index = -1;
     app->hover_result_index = -1;
+    app->hover_lnk_chip_row = -1;
     app->results_top_index = 0;
     app->max_visible_rows = LAUNCHER_DEFAULT_VISIBLE_ROWS;
     app->everything_available = true;
@@ -2628,6 +2728,7 @@ app_init(AppState *app, HINSTANCE instance)
     debug_log_wide(L"hotkey registered");
     SetTimer(app->hwnd, 1, 16, NULL);
     app_refresh_results(app);
+    catalog_watch_start(app->hwnd, app->install_dir);
     debug_log_wide(L"app_init complete results=%u", app->results.count);
     return true;
 }
@@ -2635,6 +2736,7 @@ app_init(AppState *app, HINSTANCE instance)
 static void
 app_shutdown(AppState *app)
 {
+    catalog_watch_stop();
     UnregisterHotKey(app->hwnd, LAUNCHER_HOTKEY_ID);
     app_shutdown_icon_cache(app);
     ctx_menu_icons_destroy(app->ctx_menu_icons);
