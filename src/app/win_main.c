@@ -828,13 +828,20 @@ app_ctx_menu_update_layout(AppState *app, u32 client_w, u32 client_h, const CtxM
         row_h = min_row;
     }
 
-    f32 min_w = 168.0f * s;
+    /* Horizontal slack must match ctx row insets: ctx_pad*2 + inner pad*2 + [icon + gap]. */
+    f32 ctx_row_pad = 8.0f * s;
+    f32 row_inner_pad = 2.0f * s;
+    f32 icon_row_extra = (18.0f * s) + (7.0f * s); /* max icon side + icon_gap in ui_control_context_menu_item */
+    f32 min_w = 185.0f * s;
     f32 label_w = min_w;
     ArenaTemp temp = arena_temp_begin(&app->frame_arena);
     for (s32 i = 0; i < n; ++i) {
         f32 w = kb_text_measure_utf8_width(&app->frame_arena, &app->text_ctx_menu, k_ctx_menu_labels[picks[i].action]);
-        f32 row_slack = (picks[i].action == (u8)CtxAction_Launch) ? (8.0f * s) : (26.0f * s);
-        w += pad * 2.0f + row_slack;
+        f32 h_slack = 2.0f * ctx_row_pad + 2.0f * row_inner_pad;
+        if (picks[i].action != (u8)CtxAction_Launch) {
+            h_slack += icon_row_extra;
+        }
+        w += h_slack;
         if (w > label_w) {
             label_w = w;
         }
@@ -1315,10 +1322,8 @@ app_scroll_results_list(AppState *app, s32 wheel_delta)
     if ((s32)app->results.count <= rows) {
         return;
     }
-    s32 lines = wheel_delta * 3 / WHEEL_DELTA;
-    if (lines == 0) {
-        lines = wheel_delta > 0 ? 1 : -1;
-    }
+    /* One result row per wheel message (direction only). */
+    s32 lines = wheel_delta > 0 ? 1 : -1;
     app->results_top_index -= lines;
     app_clamp_results_top_bounds(app);
 }
