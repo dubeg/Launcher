@@ -322,6 +322,45 @@ utf8_clamped_byte_len(const char *utf8, size_t max_bytes)
     return i;
 }
 
+/* Byte index after the UTF-8 codepoint that starts at `off` (invalid bytes advance by 1). */
+static size_t
+utf8_next_cp_byte(const char *s, size_t len, size_t off)
+{
+    if (off >= len) {
+        return len;
+    }
+    unsigned char c = (unsigned char)s[off];
+    size_t nb = 1;
+    if (c < 0x80u) {
+        nb = 1;
+    } else if ((c & 0xE0u) == 0xC0u) {
+        nb = 2;
+    } else if ((c & 0xF0u) == 0xE0u) {
+        nb = 3;
+    } else if ((c & 0xF8u) == 0xF0u) {
+        nb = 4;
+    }
+    if (off + nb > len) {
+        return len;
+    }
+    return off + nb;
+}
+
+/* starts[k] = byte offset after k UTF-8 codepoints; starts[0]=0; *out_nchars = n with starts[n]==len. */
+static void
+utf8_prefix_byte_offsets(const char *s, size_t len, size_t *starts, size_t *out_nchars, size_t max_starts)
+{
+    starts[0] = 0;
+    size_t n = 0;
+    size_t i = 0;
+    while (i < len && n + 1 < max_starts) {
+        i = utf8_next_cp_byte(s, len, i);
+        n++;
+        starts[n] = i;
+    }
+    *out_nchars = n;
+}
+
 static bool
 app_clipboard_set_utf8(HWND hwnd, const char *utf8, s32 byte_len)
 {
@@ -1719,30 +1758,36 @@ draw_text_line_clamped_font(AppState *app, KbTextSystem *font, f32 x, f32 baseli
         length = 1023;
     }
     char buffer[1024];
-    memcpy(buffer, text, length);
-    buffer[length] = 0;
+    /* Longest prefix (whole UTF-8 codepoints) that fits max_width, then "...". */
+    size_t starts[1024];
+    size_t nchar = 0;
+    utf8_prefix_byte_offsets(text, length, starts, &nchar, array_count(starts));
 
-    size_t low = 0;
-    size_t high = length;
-    size_t best = 0;
-    while (low <= high) {
-        size_t mid = low + ((high - low) / 2);
-        buffer[mid] = 0;
+    size_t lo = 0;
+    size_t hi = nchar;
+    size_t bestk = 0;
+    while (lo <= hi) {
+        size_t k = lo + ((hi - lo) / 2);
+        size_t bend = starts[k];
+        memcpy(buffer, text, bend);
+        buffer[bend] = 0;
         temp = arena_temp_begin(&app->frame_arena);
         ShapedText prefix = kb_text_shape(&app->frame_arena, font, buffer, 0.0f, 0.0f);
         arena_temp_end(temp);
         if (prefix.width + ell.width <= max_width) {
-            best = mid;
-            low = mid + 1;
+            bestk = k;
+            lo = k + 1;
         } else {
-            if (mid == 0) {
+            if (k == 0) {
                 break;
             }
-            high = mid - 1;
+            hi = k - 1;
         }
     }
 
-    buffer[best] = 0;
+    size_t bend = starts[bestk];
+    memcpy(buffer, text, bend);
+    buffer[bend] = 0;
     strcat_s(buffer, sizeof(buffer), ellipsis);
     draw_text_line_font(app, font, &app->frame_arena, x, baseline_y, buffer, color);
 }
