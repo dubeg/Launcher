@@ -34,44 +34,6 @@ push_temp_item(TempItemList *list, const LaunchItem *item)
 }
 
 static bool
-path_contains_ci(const wchar_t *path, const wchar_t *needle)
-{
-    if (!path || !needle || !needle[0]) {
-        return false;
-    }
-    size_t n = wcslen(needle);
-    for (const wchar_t *p = path; *p; ++p) {
-        if (_wcsnicmp(p, needle, (int)n) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool
-windows_scan_should_skip_dir(const wchar_t *full_path)
-{
-    static const wchar_t *const k_skip_markers[] = {
-        L"\\WinSxS\\",
-        L"\\servicing\\",
-        L"\\assembly\\",
-        L"\\Installer\\",
-        L"\\SoftwareDistribution\\",
-        L"\\System32\\DriverStore\\",
-        L"\\SysWOW64\\DriverStore\\",
-        L"\\WinRE\\",
-        L"\\ModemLogs\\",
-        L"\\Logs\\CBS\\",
-    };
-    for (u32 i = 0; i < array_count(k_skip_markers); ++i) {
-        if (path_contains_ci(full_path, k_skip_markers[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool
 extension_is_windows_program(const wchar_t *ext)
 {
     if (!ext || !ext[0]) {
@@ -119,18 +81,19 @@ append_windows_program_file(Arena *arena, TempItemList *list, const CatalogAlias
     push_temp_item(list, &item);
 }
 
+/*
+ * Only direct children of `dir` (no subfolders). Avoids locale trees like System32\en-US
+ * and never visits SysWOW64 when combined with roots below.
+ */
 static void
-scan_windows_dir_recursive(Arena *arena, TempItemList *list, const CatalogAliases *aliases, const wchar_t *current_dir)
+scan_windows_dir_flat(Arena *arena, TempItemList *list, const CatalogAliases *aliases, const wchar_t *dir)
 {
-    if (list->count >= WINDOWS_CATALOG_MAX_ITEMS) {
-        return;
-    }
-    if (windows_scan_should_skip_dir(current_dir)) {
+    if (list->count >= WINDOWS_CATALOG_MAX_ITEMS || !dir || !dir[0]) {
         return;
     }
 
     wchar_t pattern[MAX_PATH * 4];
-    _snwprintf_s(pattern, array_count(pattern), _TRUNCATE, L"%ls\\*", current_dir);
+    _snwprintf_s(pattern, array_count(pattern), _TRUNCATE, L"%ls\\*", dir);
 
     WIN32_FIND_DATAW find_data;
     HANDLE find = FindFirstFileW(pattern, &find_data);
@@ -143,20 +106,15 @@ scan_windows_dir_recursive(Arena *arena, TempItemList *list, const CatalogAliase
             (find_data.cFileName[1] == 0 || (find_data.cFileName[1] == L'.' && find_data.cFileName[2] == 0))) {
             continue;
         }
-
-        wchar_t child[MAX_PATH * 4];
-        _snwprintf_s(child, array_count(child), _TRUNCATE, L"%ls\\%ls", current_dir, find_data.cFileName);
-
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-                continue;
-            }
-            scan_windows_dir_recursive(arena, list, aliases, child);
-        } else {
-            const wchar_t *ext = PathFindExtensionW(find_data.cFileName);
-            if (extension_is_windows_program(ext)) {
-                append_windows_program_file(arena, list, aliases, child, find_data.cFileName);
-            }
+            continue;
+        }
+
+        wchar_t full[MAX_PATH * 4];
+        _snwprintf_s(full, array_count(full), _TRUNCATE, L"%ls\\%ls", dir, find_data.cFileName);
+        const wchar_t *ext = PathFindExtensionW(find_data.cFileName);
+        if (extension_is_windows_program(ext)) {
+            append_windows_program_file(arena, list, aliases, full, find_data.cFileName);
         }
     } while (FindNextFileW(find, &find_data));
 
@@ -176,7 +134,11 @@ system32_catalog_build(Arena *arena, const CatalogAliases *aliases, LaunchItemAr
     }
 
     TempItemList temp = {0};
-    scan_windows_dir_recursive(arena, &temp, aliases, win_dir);
+    scan_windows_dir_flat(arena, &temp, aliases, win_dir);
+
+    wchar_t system32[MAX_PATH * 4];
+    _snwprintf_s(system32, array_count(system32), _TRUNCATE, L"%ls\\System32", win_dir);
+    scan_windows_dir_flat(arena, &temp, aliases, system32);
 
     if (temp.count == 0) {
         return false;
