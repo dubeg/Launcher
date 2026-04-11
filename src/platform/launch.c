@@ -2,6 +2,7 @@
 
 #include <shellapi.h>
 #include <stdio.h>
+#include <wchar.h>
 
 static void
 path_strip_trailing_separators(wchar_t *path)
@@ -23,6 +24,19 @@ path_is_directory_wide(const wchar_t *path)
     if (attr == INVALID_FILE_ATTRIBUTES)
         return false;
     return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+static bool
+launch_path_extension_iequals(const wchar_t *path, const wchar_t *ext_with_dot)
+{
+    if (!path || !ext_with_dot) {
+        return false;
+    }
+    const wchar_t *dot = wcsrchr(path, L'.');
+    if (!dot) {
+        return false;
+    }
+    return _wcsicmp(dot, ext_with_dot) == 0;
 }
 
 bool
@@ -52,6 +66,30 @@ platform_launch_item(const LaunchItem *item)
         info.lpVerb = L"open";
         info.lpFile = explorer_path;
         info.lpParameters = params;
+        return ShellExecuteExW(&info) == TRUE;
+    }
+
+    if (item->launch_path && launch_path_extension_iequals(item->launch_path, L".cpl") && item->arguments == NULL) {
+        wchar_t system_dir[MAX_PATH];
+        UINT sys_len = GetSystemDirectoryW(system_dir, array_count(system_dir));
+        if (sys_len == 0) {
+            return false;
+        }
+        wchar_t control_exe[MAX_PATH * 2];
+        _snwprintf_s(control_exe, array_count(control_exe), _TRUNCATE, L"%ls\\control.exe", system_dir);
+
+        wchar_t params[MAX_PATH * 4];
+        _snwprintf_s(params, array_count(params), _TRUNCATE, L"\"%ls\"", item->launch_path);
+
+        SHELLEXECUTEINFOW info;
+        ZeroMemory(&info, sizeof(info));
+        info.cbSize = sizeof(info);
+        info.fMask = SEE_MASK_NOASYNC;
+        info.nShow = SW_SHOWNORMAL;
+        info.lpVerb = NULL;
+        info.lpFile = control_exe;
+        info.lpParameters = params;
+        info.lpDirectory = system_dir;
         return ShellExecuteExW(&info) == TRUE;
     }
 

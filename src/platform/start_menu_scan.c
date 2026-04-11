@@ -52,12 +52,68 @@ resolve_shortcut(const wchar_t *shortcut_path, wchar_t *target, size_t target_co
     return ok;
 }
 
+static bool
+extension_is_program_file(const wchar_t *ext)
+{
+    if (!ext || !ext[0]) {
+        return false;
+    }
+    return _wcsicmp(ext, L".exe") == 0 || _wcsicmp(ext, L".msc") == 0 || _wcsicmp(ext, L".cpl") == 0
+        || _wcsicmp(ext, L".com") == 0 || _wcsicmp(ext, L".bat") == 0 || _wcsicmp(ext, L".cmd") == 0
+        || _wcsicmp(ext, L".ps1") == 0;
+}
+
+static bool
+shortcut_link_target_allowed(const wchar_t *target_path)
+{
+    if (!target_path || !target_path[0]) {
+        return false;
+    }
+    const wchar_t *ext = PathFindExtensionW(target_path);
+    if (!ext || !ext[0]) {
+        return false;
+    }
+    return _wcsicmp(ext, L".exe") == 0 || _wcsicmp(ext, L".bat") == 0 || _wcsicmp(ext, L".cmd") == 0
+        || _wcsicmp(ext, L".ps1") == 0 || _wcsicmp(ext, L".msc") == 0 || _wcsicmp(ext, L".cpl") == 0
+        || _wcsicmp(ext, L".com") == 0 || _wcsicmp(ext, L".msi") == 0;
+}
+
+static void
+append_direct_program_file(Arena *arena, TempItemList *list, const wchar_t *file_path)
+{
+    char *display_name_utf8 = wide_path_filename_utf8(arena, file_path);
+    char *path_utf8 = utf8_from_wide(arena, file_path);
+    char *search_base = arena_strdup(arena, display_name_utf8);
+    char *dot = strrchr(search_base, '.');
+    if (dot) {
+        *dot = 0;
+    }
+
+    size_t search_size = strlen(search_base) + 1 + strlen(path_filename_utf8(path_utf8)) + 1;
+    char *combined = (char *)arena_push_zero(arena, search_size, 1);
+    _snprintf_s(combined, search_size, _TRUNCATE, "%s %s", search_base, path_filename_utf8(path_utf8));
+    lowercase_ascii_in_place(combined);
+
+    LaunchItem item = {0};
+    item.mode = SearchMode_Apps;
+    item.source = LaunchSource_StartMenu;
+    item.display_name = arena_strdup(arena, search_base);
+    item.search_text = arena_strdup(arena, combined);
+    item.subtitle = arena_strdup(arena, path_utf8);
+    item.launch_path = arena_wcsdup(arena, file_path);
+    item.arguments = NULL;
+    push_temp_item(list, &item);
+}
+
 static void
 append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
 {
     wchar_t target[MAX_PATH * 4] = {0};
     wchar_t arguments[512] = {0};
     if (!resolve_shortcut(shortcut_path, target, array_count(target), arguments, array_count(arguments))) {
+        return;
+    }
+    if (!shortcut_link_target_allowed(target)) {
         return;
     }
 
@@ -107,8 +163,13 @@ scan_directory_recursive(Arena *arena, TempItemList *list, const wchar_t *direct
 
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             scan_directory_recursive(arena, list, full_path);
-        } else if (_wcsicmp(PathFindExtensionW(find_data.cFileName), L".lnk") == 0) {
-            append_shortcut(arena, list, full_path);
+        } else {
+            const wchar_t *ext = PathFindExtensionW(find_data.cFileName);
+            if (_wcsicmp(ext, L".lnk") == 0) {
+                append_shortcut(arena, list, full_path);
+            } else if (extension_is_program_file(ext)) {
+                append_direct_program_file(arena, list, full_path);
+            }
         }
     } while (FindNextFileW(find, &find_data));
 

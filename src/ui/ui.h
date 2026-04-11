@@ -69,6 +69,7 @@ typedef struct UiTheme {
     RenderColor mode_pill_bg;
     RenderColor mode_pill_fg;
     RenderColor row_selected_bg;
+    RenderColor row_hover_bg;
     RenderColor input_selection_bg;
     RenderColor input_caret;
     RenderColor scrollbar_track;
@@ -80,7 +81,7 @@ typedef struct UiTextInputControl {
     const char *text;
     const char *placeholder;
     bool has_text;
-    f32 scroll_x;
+    f32 *scroll_x;
     s32 caret_index;
     s32 sel_start;
     s32 sel_end;
@@ -134,6 +135,12 @@ bool ui_pop_clip(UiDrawList *list);
 void ui_control_panel(UiDrawList *list, UiRect bounds, RenderColor color);
 void ui_control_border(UiDrawList *list, UiRect bounds, f32 thickness, RenderColor color);
 void ui_control_mode_pill(UiDrawList *list, UiRect bounds, const char *label, f32 label_width, RenderColor bg, RenderColor fg, struct KbTextSystem *font);
+void ui_control_text_input(UiDrawList *list,
+                           Arena *arena,
+                           const UiTextInputControl *input,
+                           const UiTheme *theme,
+                           struct KbTextSystem *font,
+                           f32 dpi_scale);
 void ui_control_footer(UiDrawList *list, UiRect bounds, const char *text, RenderColor color, struct KbTextSystem *font);
 void ui_control_results_row(UiDrawList *list, UiRect bounds, bool selected, RenderColor selected_bg);
 void ui_control_scrollbar(UiDrawList *list, const UiScrollbarControl *scrollbar, RenderColor track_color, RenderColor thumb_color);

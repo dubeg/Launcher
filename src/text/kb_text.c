@@ -53,6 +53,25 @@ kb_text_shutdown(KbTextSystem *text)
     ZeroMemory(text, sizeof(*text));
 }
 
+void
+kb_text_line_layout_centered(const KbTextSystem *text, f32 bounds_top, f32 bounds_height, KbTextLineLayout *out)
+{
+    if (!text || !out) {
+        return;
+    }
+    out->line_height = text->line_height;
+    out->line_top = bounds_top + (bounds_height - out->line_height) * 0.5f;
+    f32 body = text->ascent - text->descent;
+    if (body < 1.0f) {
+        body = out->line_height;
+    }
+    f32 half_leading = (out->line_height - body) * 0.5f;
+    if (half_leading < 0.0f) {
+        half_leading = 0.0f;
+    }
+    out->baseline_y = out->line_top + text->ascent + half_leading;
+}
+
 ShapedText
 kb_text_shape(Arena *arena, KbTextSystem *text, const char *utf8, f32 x, f32 baseline_y)
 {

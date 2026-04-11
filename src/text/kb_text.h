@@ -33,8 +33,15 @@ typedef struct KbTextSystem {
     f32 descent;
 } KbTextSystem;
 
+typedef struct KbTextLineLayout {
+    f32 line_top;
+    f32 baseline_y;
+    f32 line_height;
+} KbTextLineLayout;
+
 bool kb_text_init(KbTextSystem *text, const wchar_t *font_path, f32 pixel_height);
 void kb_text_shutdown(KbTextSystem *text);
+void kb_text_line_layout_centered(const KbTextSystem *text, f32 bounds_top, f32 bounds_height, KbTextLineLayout *out);
 ShapedText kb_text_shape(Arena *arena, KbTextSystem *text, const char *utf8, f32 x, f32 baseline_y);
 void kb_text_snap_shaped_quads_to_pixels(ShapedText *shaped);
 

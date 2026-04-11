@@ -35,47 +35,58 @@ append_items(TempItemList *list, const LaunchItemArray *array)
 static void
 append_directory_as_app(Arena *arena, TempItemList *list, const wchar_t *directory)
 {
-    wchar_t pattern[MAX_PATH * 4];
-    _snwprintf_s(pattern, array_count(pattern), _TRUNCATE, L"%ls\\*.exe", directory);
+    static const wchar_t *const k_extra_path_globs[] = {
+        L"*.exe",
+        L"*.msc",
+        L"*.cpl",
+        L"*.com",
+        L"*.bat",
+        L"*.cmd",
+    };
 
-    WIN32_FIND_DATAW find_data;
-    HANDLE find = FindFirstFileW(pattern, &find_data);
-    if (find == INVALID_HANDLE_VALUE) {
-        return;
-    }
+    for (u32 g = 0; g < array_count(k_extra_path_globs); ++g) {
+        wchar_t pattern[MAX_PATH * 4];
+        _snwprintf_s(pattern, array_count(pattern), _TRUNCATE, L"%ls\\%ls", directory, k_extra_path_globs[g]);
 
-    do {
-        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        WIN32_FIND_DATAW find_data;
+        HANDLE find = FindFirstFileW(pattern, &find_data);
+        if (find == INVALID_HANDLE_VALUE) {
             continue;
         }
-        wchar_t full_path[MAX_PATH * 4];
-        _snwprintf_s(full_path, array_count(full_path), _TRUNCATE, L"%ls\\%ls", directory, find_data.cFileName);
 
-        char exe_name[260];
-        utf8_from_wide_buffer(find_data.cFileName, exe_name, array_count(exe_name));
-        lowercase_ascii_in_place(exe_name);
+        do {
+            if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                continue;
+            }
+            wchar_t full_path[MAX_PATH * 4];
+            _snwprintf_s(full_path, array_count(full_path), _TRUNCATE, L"%ls\\%ls", directory, find_data.cFileName);
 
-        LaunchItem item = {0};
-        item.mode = SearchMode_Apps;
-        item.source = LaunchSource_ExtraPath;
-        item.display_name = arena_strdup(arena, exe_name);
-        char *dot = strrchr(item.display_name, '.');
-        if (dot) {
-            *dot = 0;
-        }
-        item.search_text = arena_strdup(arena, exe_name);
-        item.subtitle = utf8_from_wide(arena, full_path);
-        item.launch_path = arena_wcsdup(arena, full_path);
+            char exe_name[260];
+            utf8_from_wide_buffer(find_data.cFileName, exe_name, array_count(exe_name));
+            lowercase_ascii_in_place(exe_name);
 
-        if (list->count >= list->capacity) {
-            u32 new_capacity = list->capacity ? list->capacity * 2 : 64;
-            list->items = (LaunchItem *)heap_realloc(list->items, sizeof(LaunchItem) * new_capacity);
-            list->capacity = new_capacity;
-        }
-        list->items[list->count++] = item;
-    } while (FindNextFileW(find, &find_data));
+            LaunchItem item = {0};
+            item.mode = SearchMode_Apps;
+            item.source = LaunchSource_ExtraPath;
+            item.display_name = arena_strdup(arena, exe_name);
+            char *dot = strrchr(item.display_name, '.');
+            if (dot) {
+                *dot = 0;
+            }
+            item.search_text = arena_strdup(arena, exe_name);
+            item.subtitle = utf8_from_wide(arena, full_path);
+            item.launch_path = arena_wcsdup(arena, full_path);
 
-    FindClose(find);
+            if (list->count >= list->capacity) {
+                u32 new_capacity = list->capacity ? list->capacity * 2 : 64;
+                list->items = (LaunchItem *)heap_realloc(list->items, sizeof(LaunchItem) * new_capacity);
+                list->capacity = new_capacity;
+            }
+            list->items[list->count++] = item;
+        } while (FindNextFileW(find, &find_data));
+
+        FindClose(find);
+    }
 }
 
 static void

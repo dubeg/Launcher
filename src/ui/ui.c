@@ -2,6 +2,9 @@
 #include "../text/kb_text.h"
 
 #include <math.h>
+#include <string.h>
+
+#define UI_TEXT_INPUT_SCRATCH_CAP 512
 
 UiTheme
 ui_theme_default(void)
@@ -11,11 +14,12 @@ ui_theme_default(void)
     theme.bg_top_bar = (RenderColor){0.11f, 0.12f, 0.15f, 1.0f};
     theme.bg_results_panel = (RenderColor){0.09f, 0.10f, 0.13f, 1.0f};
     theme.fg_primary = (RenderColor){0.97f, 0.98f, 1.0f, 1.0f};
-    theme.fg_secondary = (RenderColor){0.60f, 0.65f, 0.72f, 1.0f};
+    theme.fg_secondary = (RenderColor){0.46f, 0.50f, 0.56f, 1.0f};
     theme.fg_footer = (RenderColor){0.56f, 0.60f, 0.66f, 1.0f};
     theme.mode_pill_bg = (RenderColor){0.14f, 0.22f, 0.36f, 1.0f};
     theme.mode_pill_fg = (RenderColor){0.78f, 0.82f, 0.88f, 1.0f};
     theme.row_selected_bg = (RenderColor){0.16f, 0.25f, 0.42f, 1.0f};
+    theme.row_hover_bg = (RenderColor){0.13f, 0.16f, 0.22f, 1.0f};
     theme.input_selection_bg = (RenderColor){0.24f, 0.43f, 0.75f, 0.35f};
     theme.input_caret = (RenderColor){0.97f, 0.98f, 1.0f, 1.0f};
     theme.scrollbar_track = (RenderColor){0.18f, 0.20f, 0.25f, 0.9f};
@@ -215,6 +219,115 @@ ui_control_border(UiDrawList *list, UiRect bounds, f32 thickness, RenderColor co
     ui_draw_rect(list, ui_rect(bounds.x, bounds.y + bounds.h - thickness, bounds.w, thickness), color);
     ui_draw_rect(list, ui_rect(bounds.x, bounds.y + thickness, thickness, bounds.h - thickness * 2.0f), color);
     ui_draw_rect(list, ui_rect(bounds.x + bounds.w - thickness, bounds.y + thickness, thickness, bounds.h - thickness * 2.0f), color);
+}
+
+void
+ui_control_text_input(UiDrawList *list, Arena *arena, const UiTextInputControl *input, const UiTheme *theme, KbTextSystem *font, f32 dpi_scale)
+{
+    if (!list || !arena || !input || !theme || !font || !input->scroll_x) {
+        return;
+    }
+
+    f32 s = dpi_scale > 0.0f ? dpi_scale : 1.0f;
+    f32 input_x = input->bounds.x;
+    f32 input_top = input->bounds.y;
+    f32 input_height = input->bounds.h;
+    f32 input_right = input->bounds.x + input->bounds.w;
+    f32 visible_width = input_right - input_x;
+    if (visible_width < 8.0f * s) {
+        visible_width = 8.0f * s;
+    }
+
+    KbTextLineLayout line = {0};
+    kb_text_line_layout_centered(font, input_top, input_height, &line);
+
+    f32 *scroll_x = input->scroll_x;
+
+    char before_caret[UI_TEXT_INPUT_SCRATCH_CAP];
+    s32 caret_n = input->caret_index;
+    if (caret_n < 0) {
+        caret_n = 0;
+    }
+    if (caret_n >= (s32)sizeof(before_caret)) {
+        caret_n = (s32)sizeof(before_caret) - 1;
+    }
+    if (input->text && caret_n > 0) {
+        memcpy(before_caret, input->text, (size_t)caret_n);
+    }
+    before_caret[caret_n] = 0;
+    ShapedText before_shape = kb_text_shape(arena, font, before_caret, 0.0f, 0.0f);
+    f32 caret_x = before_shape.width;
+
+    if (caret_x - *scroll_x > visible_width) {
+        *scroll_x = caret_x - visible_width;
+    }
+    if (caret_x - *scroll_x < 0.0f) {
+        *scroll_x = caret_x;
+    }
+    if (*scroll_x < 0.0f) {
+        *scroll_x = 0.0f;
+    }
+
+    f32 text_draw_x = input_x - *scroll_x;
+    if (input->has_text) {
+        ui_draw_text_font(list, text_draw_x, line.baseline_y, input->text, theme->fg_primary, font);
+    } else if (input->placeholder) {
+        ui_draw_text_font(list, text_draw_x, line.baseline_y, input->placeholder, theme->fg_footer, font);
+    }
+
+    if (input->sel_start != input->sel_end) {
+        s32 sel_start = input->sel_start;
+        s32 sel_end = input->sel_end;
+        if (sel_start > sel_end) {
+            s32 temp = sel_start;
+            sel_start = sel_end;
+            sel_end = temp;
+        }
+
+        char before_sel[UI_TEXT_INPUT_SCRATCH_CAP];
+        char selected_text[UI_TEXT_INPUT_SCRATCH_CAP];
+        if (sel_start > 0 && input->text) {
+            s32 copy_n = sel_start;
+            if (copy_n >= (s32)sizeof(before_sel)) {
+                copy_n = (s32)sizeof(before_sel) - 1;
+            }
+            memcpy(before_sel, input->text, (size_t)copy_n);
+            before_sel[copy_n] = 0;
+        } else {
+            before_sel[0] = 0;
+        }
+
+        s32 sel_len = sel_end - sel_start;
+        if (sel_len > 0 && input->text) {
+            if (sel_len >= (s32)sizeof(selected_text)) {
+                sel_len = (s32)sizeof(selected_text) - 1;
+            }
+            memcpy(selected_text, input->text + sel_start, (size_t)sel_len);
+            selected_text[sel_len] = 0;
+        } else {
+            selected_text[0] = 0;
+        }
+
+        ShapedText before_sel_shape = kb_text_shape(arena, font, before_sel, 0.0f, 0.0f);
+        ShapedText selected_shape = kb_text_shape(arena, font, selected_text, 0.0f, 0.0f);
+        f32 sel_x0 = input_x + before_sel_shape.width - *scroll_x;
+        f32 sel_x1 = sel_x0 + selected_shape.width;
+        if (sel_x1 > input_x && sel_x0 < input_right) {
+            f32 clamped_x0 = sel_x0 < input_x ? input_x : sel_x0;
+            f32 clamped_x1 = sel_x1 > input_right ? input_right : sel_x1;
+            ui_draw_rect(list, ui_rect(clamped_x0, line.line_top, clamped_x1 - clamped_x0, line.line_height), theme->input_selection_bg);
+            if (input->text) {
+                ui_draw_text_font(list, text_draw_x, line.baseline_y, input->text, theme->fg_primary, font);
+            }
+        }
+    }
+
+    if (input->caret_visible) {
+        f32 caret_draw_x = input_x + caret_x - *scroll_x;
+        if (caret_draw_x >= input_x && caret_draw_x <= input_right) {
+            ui_draw_rect(list, ui_rect(caret_draw_x, line.line_top, 2.0f * s, line.line_height), theme->input_caret);
+        }
+    }
 }
 
 void
