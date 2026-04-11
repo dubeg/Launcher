@@ -2,6 +2,7 @@
 
 #include "../core/base.h"
 #include "../platform/catalog.h"
+#include "../platform/catalog_aliases.h"
 #include "../platform/everything_client.h"
 #include "../platform/icon_worker.h"
 #include "../platform/launch.h"
@@ -88,6 +89,7 @@ typedef struct AppState {
     KbTextSystem text;
     KbTextSystem text_results;
     LaunchItemArray app_catalog;
+    CatalogAliases catalog_aliases;
     SearchResultArray results;
     SearchMode mode;
     bool visible;
@@ -320,7 +322,7 @@ static void
 app_init_catalog(AppState *app)
 {
     app->catalog_arena = arena_create(gigabytes(1), megabytes(4));
-    app_catalog_build(&app->catalog_arena, app->install_dir, &app->app_catalog);
+    app_catalog_build(&app->catalog_arena, app->install_dir, &app->app_catalog, &app->catalog_aliases);
 }
 
 static void
@@ -335,7 +337,7 @@ app_refresh_results(AppState *app)
     if (app->mode == SearchMode_Apps) {
         app->results = fuzzy_rank_items(&app->results_arena, lower_query, app->app_catalog.items, app->app_catalog.count, LAUNCHER_MAX_RESULTS);
     } else {
-        EverythingQueryResult query = everything_query_files(&app->results_arena, app->query, 128);
+        EverythingQueryResult query = everything_query_files(&app->results_arena, app->query, 128, &app->catalog_aliases);
         app->everything_available = query.available;
         app->results = fuzzy_rank_items(&app->results_arena, lower_query, query.items.items, query.items.count, LAUNCHER_MAX_RESULTS);
     }

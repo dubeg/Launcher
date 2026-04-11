@@ -1,4 +1,6 @@
 #include "start_menu_scan.h"
+#include "catalog_aliases.h"
+#include "shell_display_name.h"
 
 #include "../core/base.h"
 
@@ -79,25 +81,40 @@ shortcut_link_target_allowed(const wchar_t *target_path)
 }
 
 static void
-append_direct_program_file(Arena *arena, TempItemList *list, const wchar_t *file_path)
+append_direct_program_file(Arena *arena, TempItemList *list, const wchar_t *file_path, const CatalogAliases *aliases)
 {
-    char *display_name_utf8 = wide_path_filename_utf8(arena, file_path);
     char *path_utf8 = utf8_from_wide(arena, file_path);
+    char *display_name_utf8 = wide_path_filename_utf8(arena, file_path);
     char *search_base = arena_strdup(arena, display_name_utf8);
     char *dot = strrchr(search_base, '.');
     if (dot) {
         *dot = 0;
     }
 
-    size_t search_size = strlen(search_base) + 1 + strlen(path_filename_utf8(path_utf8)) + 1;
+    char exe_key[260];
+    strcpy_s(exe_key, sizeof(exe_key), path_filename_utf8(path_utf8));
+    lowercase_ascii_in_place(exe_key);
+
+    char *shell_display = NULL;
+    char *display_final = NULL;
+    const char *alias_name = catalog_aliases_lookup_msc_cpl(aliases, exe_key);
+    if (alias_name) {
+        display_final = arena_strdup(arena, alias_name);
+    } else if (shell_try_item_display_name_utf8(arena, NULL, file_path, &shell_display) && shell_display) {
+        display_final = arena_strdup(arena, shell_display);
+    } else {
+        display_final = arena_strdup(arena, search_base);
+    }
+
+    size_t search_size = strlen(display_final) + 1 + strlen(exe_key) + 1;
     char *combined = (char *)arena_push_zero(arena, search_size, 1);
-    _snprintf_s(combined, search_size, _TRUNCATE, "%s %s", search_base, path_filename_utf8(path_utf8));
+    _snprintf_s(combined, search_size, _TRUNCATE, "%s %s", display_final, exe_key);
     lowercase_ascii_in_place(combined);
 
     LaunchItem item = {0};
     item.mode = SearchMode_Apps;
     item.source = LaunchSource_StartMenu;
-    item.display_name = arena_strdup(arena, search_base);
+    item.display_name = display_final;
     item.search_text = arena_strdup(arena, combined);
     item.subtitle = arena_strdup(arena, path_utf8);
     item.launch_path = arena_wcsdup(arena, file_path);
@@ -117,23 +134,33 @@ append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
         return;
     }
 
-    char *display_name_utf8 = wide_path_filename_utf8(arena, shortcut_path);
     char *target_utf8 = utf8_from_wide(arena, target);
-    char *search_text = arena_strdup(arena, display_name_utf8);
-    char *dot = strrchr(search_text, '.');
-    if (dot) {
-        *dot = 0;
+    char exe_key[260];
+    strcpy_s(exe_key, sizeof(exe_key), path_filename_utf8(target_utf8));
+    lowercase_ascii_in_place(exe_key);
+
+    char *shell_display = NULL;
+    char *display_final = NULL;
+    if (shell_try_item_display_name_utf8(arena, shortcut_path, target, &shell_display) && shell_display) {
+        display_final = arena_strdup(arena, shell_display);
+    } else {
+        char *display_name_utf8 = wide_path_filename_utf8(arena, shortcut_path);
+        display_final = arena_strdup(arena, display_name_utf8);
+        char *dot = strrchr(display_final, '.');
+        if (dot) {
+            *dot = 0;
+        }
     }
 
-    size_t search_size = strlen(search_text) + 1 + strlen(path_filename_utf8(target_utf8)) + 1;
+    size_t search_size = strlen(display_final) + 1 + strlen(exe_key) + 1;
     char *combined = (char *)arena_push_zero(arena, search_size, 1);
-    _snprintf_s(combined, search_size, _TRUNCATE, "%s %s", search_text, path_filename_utf8(target_utf8));
+    _snprintf_s(combined, search_size, _TRUNCATE, "%s %s", display_final, exe_key);
     lowercase_ascii_in_place(combined);
 
     LaunchItem item = {0};
     item.mode = SearchMode_Apps;
     item.source = LaunchSource_StartMenu;
-    item.display_name = arena_strdup(arena, search_text);
+    item.display_name = display_final;
     item.search_text = arena_strdup(arena, combined);
     item.subtitle = arena_strdup(arena, target_utf8);
     item.launch_path = arena_wcsdup(arena, target);
@@ -142,7 +169,7 @@ append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
 }
 
 static void
-scan_directory_recursive(Arena *arena, TempItemList *list, const wchar_t *directory)
+scan_directory_recursive(Arena *arena, TempItemList *list, const wchar_t *directory, const CatalogAliases *aliases)
 {
     wchar_t pattern[MAX_PATH * 4];
     _snwprintf_s(pattern, array_count(pattern), _TRUNCATE, L"%ls\\*", directory);
@@ -162,13 +189,13 @@ scan_directory_recursive(Arena *arena, TempItemList *list, const wchar_t *direct
         _snwprintf_s(full_path, array_count(full_path), _TRUNCATE, L"%ls\\%ls", directory, find_data.cFileName);
 
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            scan_directory_recursive(arena, list, full_path);
+            scan_directory_recursive(arena, list, full_path, aliases);
         } else {
             const wchar_t *ext = PathFindExtensionW(find_data.cFileName);
             if (_wcsicmp(ext, L".lnk") == 0) {
                 append_shortcut(arena, list, full_path);
             } else if (extension_is_program_file(ext)) {
-                append_direct_program_file(arena, list, full_path);
+                append_direct_program_file(arena, list, full_path, aliases);
             }
         }
     } while (FindNextFileW(find, &find_data));
@@ -177,21 +204,21 @@ scan_directory_recursive(Arena *arena, TempItemList *list, const wchar_t *direct
 }
 
 static void
-scan_known_folder(Arena *arena, TempItemList *list, const GUID *folder_id)
+scan_known_folder(Arena *arena, TempItemList *list, const GUID *folder_id, const CatalogAliases *aliases)
 {
     PWSTR path = NULL;
     if (SUCCEEDED(SHGetKnownFolderPath(folder_id, 0, NULL, &path))) {
-        scan_directory_recursive(arena, list, path);
+        scan_directory_recursive(arena, list, path, aliases);
         CoTaskMemFree(path);
     }
 }
 
 bool
-start_menu_scan_build(Arena *arena, LaunchItemArray *out_items)
+start_menu_scan_build(Arena *arena, const CatalogAliases *aliases, LaunchItemArray *out_items)
 {
     TempItemList temp = {0};
-    scan_known_folder(arena, &temp, &FOLDERID_Programs);
-    scan_known_folder(arena, &temp, &FOLDERID_CommonPrograms);
+    scan_known_folder(arena, &temp, &FOLDERID_Programs, aliases);
+    scan_known_folder(arena, &temp, &FOLDERID_CommonPrograms, aliases);
 
     out_items->count = temp.count;
     out_items->items = (LaunchItem *)arena_push(arena, sizeof(LaunchItem) * temp.count, sizeof(void *));

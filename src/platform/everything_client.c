@@ -1,4 +1,5 @@
 #include "everything_client.h"
+#include "catalog_aliases.h"
 
 #include "../core/base.h"
 
@@ -13,7 +14,7 @@ build_query_wide(Arena *arena, const char *query_utf8)
 }
 
 EverythingQueryResult
-everything_query_files(Arena *arena, const char *query_utf8, u32 max_results)
+everything_query_files(Arena *arena, const char *query_utf8, u32 max_results, const CatalogAliases *aliases)
 {
     EverythingQueryResult result = {0};
     if (!query_utf8 || !query_utf8[0]) {
@@ -49,13 +50,25 @@ everything_query_files(Arena *arena, const char *query_utf8, u32 max_results)
 
         char *full_path_utf8 = utf8_from_wide(arena, full_path);
         char *file_name = path_filename_utf8(full_path_utf8);
-        char *search_text = arena_strdup(arena, full_path_utf8);
-        lowercase_ascii_in_place(search_text);
+        char file_key[260];
+        strcpy_s(file_key, sizeof(file_key), file_name);
+        lowercase_ascii_in_place(file_key);
+        const char *alias_title = catalog_aliases_lookup_msc_cpl(aliases, file_key);
+        char *search_text = NULL;
+        if (alias_title) {
+            size_t st_len = strlen(full_path_utf8) + 1 + strlen(alias_title) + 1 + strlen(file_name) + 1;
+            search_text = (char *)arena_push_zero(arena, st_len, 1);
+            _snprintf_s(search_text, st_len, _TRUNCATE, "%s %s %s", full_path_utf8, alias_title, file_name);
+            lowercase_ascii_in_place(search_text);
+        } else {
+            search_text = arena_strdup(arena, full_path_utf8);
+            lowercase_ascii_in_place(search_text);
+        }
 
         LaunchItem *item = &result.items.items[i];
         item->mode = SearchMode_Files;
         item->source = LaunchSource_Everything;
-        item->display_name = arena_strdup(arena, file_name);
+        item->display_name = arena_strdup(arena, alias_title ? alias_title : file_name);
         item->search_text = arena_strdup(arena, search_text);
         item->subtitle = arena_strdup(arena, full_path_utf8);
         item->launch_path = arena_wcsdup(arena, full_path);

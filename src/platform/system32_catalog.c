@@ -1,4 +1,6 @@
 #include "system32_catalog.h"
+#include "catalog_aliases.h"
+#include "shell_display_name.h"
 
 #include "../core/base.h"
 
@@ -7,11 +9,6 @@
 #include <string.h>
 
 #pragma comment(lib, "shlwapi.lib")
-
-typedef struct AliasEntry {
-    char *exe_name;
-    char *friendly_name;
-} AliasEntry;
 
 typedef struct TempItemList {
     LaunchItem *items;
@@ -30,70 +27,8 @@ push_temp_item(TempItemList *list, const LaunchItem *item)
     list->items[list->count++] = *item;
 }
 
-static AliasEntry *
-parse_alias_entries(Arena *arena, const wchar_t *path, u32 *out_count)
-{
-    *out_count = 0;
-    FileData file = read_entire_file_wide(path);
-    if (!file.data) {
-        return NULL;
-    }
-
-    char *text = (char *)file.data;
-    u32 capacity = 32;
-    AliasEntry *entries = (AliasEntry *)arena_push_zero(arena, sizeof(AliasEntry) * capacity, sizeof(void *));
-    char *cursor = text;
-    while ((cursor = strchr(cursor, '"')) != NULL) {
-        char *key_start = cursor + 1;
-        char *key_end = strchr(key_start, '"');
-        if (!key_end) {
-            break;
-        }
-        cursor = strchr(key_end, ':');
-        if (!cursor) {
-            break;
-        }
-        cursor = strchr(cursor, '"');
-        if (!cursor) {
-            break;
-        }
-        char *value_start = cursor + 1;
-        char *value_end = strchr(value_start, '"');
-        if (!value_end) {
-            break;
-        }
-
-        if (*out_count >= capacity) {
-            u32 old_capacity = capacity;
-            capacity *= 2;
-            AliasEntry *new_entries = (AliasEntry *)arena_push_zero(arena, sizeof(AliasEntry) * capacity, sizeof(void *));
-            memcpy(new_entries, entries, sizeof(AliasEntry) * old_capacity);
-            entries = new_entries;
-        }
-        entries[*out_count].exe_name = arena_strndup(arena, key_start, (size_t)(key_end - key_start));
-        lowercase_ascii_in_place(entries[*out_count].exe_name);
-        entries[*out_count].friendly_name = arena_strndup(arena, value_start, (size_t)(value_end - value_start));
-        ++(*out_count);
-        cursor = value_end + 1;
-    }
-
-    free_file_data(&file);
-    return entries;
-}
-
-static const char *
-lookup_alias(const AliasEntry *entries, u32 count, const char *exe_name)
-{
-    for (u32 i = 0; i < count; ++i) {
-        if (_stricmp(entries[i].exe_name, exe_name) == 0) {
-            return entries[i].friendly_name;
-        }
-    }
-    return NULL;
-}
-
 bool
-system32_catalog_build(Arena *arena, const wchar_t *alias_json_path, LaunchItemArray *out_items)
+system32_catalog_build(Arena *arena, const CatalogAliases *aliases, LaunchItemArray *out_items)
 {
     out_items->items = NULL;
     out_items->count = 0;
@@ -103,9 +38,6 @@ system32_catalog_build(Arena *arena, const wchar_t *alias_json_path, LaunchItemA
     if (!len) {
         return false;
     }
-
-    u32 alias_count = 0;
-    AliasEntry *aliases = parse_alias_entries(arena, alias_json_path, &alias_count);
 
     static const wchar_t *const k_system32_globs[] = {
         L"*.exe",
@@ -139,8 +71,16 @@ system32_catalog_build(Arena *arena, const wchar_t *alias_json_path, LaunchItemA
             utf8_from_wide_buffer(find_data.cFileName, exe_name, array_count(exe_name));
             lowercase_ascii_in_place(exe_name);
 
-            const char *friendly = lookup_alias(aliases, alias_count, exe_name);
-            const char *display = friendly ? friendly : exe_name;
+            char *shell_display = NULL;
+            const char *friendly = catalog_aliases_lookup_msc_cpl(aliases, exe_name);
+            const char *display = NULL;
+            if (friendly) {
+                display = friendly;
+            } else if (shell_try_item_display_name_utf8(arena, NULL, full_path, &shell_display) && shell_display) {
+                display = shell_display;
+            } else {
+                display = exe_name;
+            }
 
             size_t search_size = strlen(display) + 1 + strlen(exe_name) + 1;
             char *search_text = (char *)arena_push_zero(arena, search_size, 1);

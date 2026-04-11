@@ -2,12 +2,13 @@
 #define LAUNCHER_EVERYTHING_CLIENT_H
 
 #include "../app/app.h"
+#include "catalog_aliases.h"
 
 typedef struct EverythingQueryResult {
     bool available;
     LaunchItemArray items;
 } EverythingQueryResult;
 
-EverythingQueryResult everything_query_files(Arena *arena, const char *query_utf8, u32 max_results);
+EverythingQueryResult everything_query_files(Arena *arena, const char *query_utf8, u32 max_results, const CatalogAliases *aliases);
 
 #endif

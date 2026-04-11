@@ -1,11 +1,40 @@
 #include "catalog.h"
 
+#include "catalog_aliases.h"
+#include "shell_display_name.h"
 #include "start_menu_scan.h"
 #include "system32_catalog.h"
 #include "../core/base.h"
 
+#include <shlwapi.h>
 #include <stdio.h>
 #include <string.h>
+
+#pragma comment(lib, "shlwapi.lib")
+
+/* Exe often lives in build\Debug while data\ is at repo root — walk up until relative path exists. */
+static bool
+catalog_resolve_existing_file(const wchar_t *start_dir, const wchar_t *relative_path, wchar_t *out, size_t out_cap_chars)
+{
+    wchar_t base[MAX_PATH * 4];
+    if (wcscpy_s(base, array_count(base), start_dir) != 0) {
+        return false;
+    }
+    for (u32 step = 0; step < 24; ++step) {
+        _snwprintf_s(out, out_cap_chars, _TRUNCATE, L"%ls\\%ls", base, relative_path);
+        DWORD attr = GetFileAttributesW(out);
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            return true;
+        }
+        if (!PathRemoveFileSpecW(base)) {
+            break;
+        }
+        if (!base[0]) {
+            break;
+        }
+    }
+    return false;
+}
 
 typedef struct TempItemList {
     LaunchItem *items;
@@ -33,7 +62,7 @@ append_items(TempItemList *list, const LaunchItemArray *array)
 }
 
 static void
-append_directory_as_app(Arena *arena, TempItemList *list, const wchar_t *directory)
+append_directory_as_app(Arena *arena, TempItemList *list, const wchar_t *directory, const CatalogAliases *aliases)
 {
     static const wchar_t *const k_extra_path_globs[] = {
         L"*.exe",
@@ -65,15 +94,33 @@ append_directory_as_app(Arena *arena, TempItemList *list, const wchar_t *directo
             utf8_from_wide_buffer(find_data.cFileName, exe_name, array_count(exe_name));
             lowercase_ascii_in_place(exe_name);
 
+            char *shell_display = NULL;
+            char *display_final = NULL;
+            const char *alias_name = catalog_aliases_lookup_msc_cpl(aliases, exe_name);
+            if (alias_name) {
+                display_final = arena_strdup(arena, alias_name);
+            } else if (shell_try_item_display_name_utf8(arena, NULL, full_path, &shell_display) && shell_display) {
+                display_final = arena_strdup(arena, shell_display);
+            } else {
+                char stem[260];
+                strcpy_s(stem, sizeof(stem), exe_name);
+                char *dot = strrchr(stem, '.');
+                if (dot) {
+                    *dot = 0;
+                }
+                display_final = arena_strdup(arena, stem);
+            }
+
+            size_t st_len = strlen(display_final) + 1 + strlen(exe_name) + 1;
+            char *search_combined = (char *)arena_push_zero(arena, st_len, 1);
+            _snprintf_s(search_combined, st_len, _TRUNCATE, "%s %s", display_final, exe_name);
+            lowercase_ascii_in_place(search_combined);
+
             LaunchItem item = {0};
             item.mode = SearchMode_Apps;
             item.source = LaunchSource_ExtraPath;
-            item.display_name = arena_strdup(arena, exe_name);
-            char *dot = strrchr(item.display_name, '.');
-            if (dot) {
-                *dot = 0;
-            }
-            item.search_text = arena_strdup(arena, exe_name);
+            item.display_name = display_final;
+            item.search_text = arena_strdup(arena, search_combined);
             item.subtitle = utf8_from_wide(arena, full_path);
             item.launch_path = arena_wcsdup(arena, full_path);
 
@@ -90,7 +137,7 @@ append_directory_as_app(Arena *arena, TempItemList *list, const wchar_t *directo
 }
 
 static void
-parse_locations_json(Arena *arena, TempItemList *list, const wchar_t *path)
+parse_locations_json(Arena *arena, TempItemList *list, const wchar_t *path, const CatalogAliases *aliases)
 {
     FileData file = read_entire_file_wide(path);
     if (!file.data) {
@@ -108,7 +155,7 @@ parse_locations_json(Arena *arena, TempItemList *list, const wchar_t *path)
         if (size > 2 && ((size >= 3 && strncmp(start, "C:\\", 3) == 0) || strncmp(start, "\\\\", 2) == 0)) {
             char *path_utf8 = arena_strndup(arena, start, size);
             wchar_t *dir = wide_from_utf8(arena, path_utf8);
-            append_directory_as_app(arena, list, dir);
+            append_directory_as_app(arena, list, dir, aliases);
         }
         cursor = end + 1;
     }
@@ -117,24 +164,34 @@ parse_locations_json(Arena *arena, TempItemList *list, const wchar_t *path)
 }
 
 bool
-app_catalog_build(Arena *arena, const wchar_t *install_dir, LaunchItemArray *out_items)
+app_catalog_build(Arena *arena, const wchar_t *install_dir, LaunchItemArray *out_items, CatalogAliases *out_aliases)
 {
     TempItemList merged = {0};
     LaunchItemArray start_menu = {0};
     LaunchItemArray system32 = {0};
 
-    start_menu_scan_build(arena, &start_menu);
-
     wchar_t alias_path[MAX_PATH * 4];
-    _snwprintf_s(alias_path, array_count(alias_path), _TRUNCATE, L"%ls\\data\\system_aliases.json", install_dir);
-    system32_catalog_build(arena, alias_path, &system32);
+    if (!catalog_resolve_existing_file(install_dir, L"data\\system_aliases.json", alias_path, array_count(alias_path))) {
+        alias_path[0] = 0;
+    }
+    CatalogAliases aliases = {0};
+    if (alias_path[0]) {
+        catalog_aliases_load_json(arena, alias_path, &aliases);
+    }
+    if (out_aliases) {
+        *out_aliases = aliases;
+    }
+
+    start_menu_scan_build(arena, &aliases, &start_menu);
+    system32_catalog_build(arena, &aliases, &system32);
 
     append_items(&merged, &start_menu);
     append_items(&merged, &system32);
 
     wchar_t config_path[MAX_PATH * 4];
-    _snwprintf_s(config_path, array_count(config_path), _TRUNCATE, L"%ls\\config\\locations.json", install_dir);
-    parse_locations_json(arena, &merged, config_path);
+    if (catalog_resolve_existing_file(install_dir, L"config\\locations.json", config_path, array_count(config_path))) {
+        parse_locations_json(arena, &merged, config_path, &aliases);
+    }
 
     out_items->count = merged.count;
     out_items->items = (LaunchItem *)arena_push(arena, sizeof(LaunchItem) * merged.count, sizeof(void *));

@@ -13,11 +13,13 @@ add_executable(launcher WIN32
     src/text/kb_text.c
     src/ui/ui.c
     src/platform/catalog.c
+    src/platform/catalog_aliases.c
     src/platform/everything_client.c
     src/platform/icon_worker.c
     src/platform/launch.c
     src/platform/start_menu_scan.c
     src/platform/system32_catalog.c
+    src/platform/shell_display_name.c
     third_party/fzy/match.c
     third_party/everything_sdk/sdk/src/Everything.c
 )
@@ -44,4 +46,5 @@ target_link_libraries(launcher PRIVATE
     shell32
     shlwapi
     ole32
+    propsys
 )
