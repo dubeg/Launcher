@@ -43,6 +43,17 @@ fatal_message(const wchar_t *message)
     ExitProcess(1);
 }
 
+void
+launcher_warning_fmt(const wchar_t *title, const wchar_t *format, ...)
+{
+    wchar_t message[2048];
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(message, array_count(message), _TRUNCATE, format, args);
+    va_end(args);
+    MessageBoxW(NULL, message, title, MB_ICONWARNING | MB_OK);
+}
+
 Arena
 arena_create(u64 reserve_size, u64 initial_commit_size)
 {

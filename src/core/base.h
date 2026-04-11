@@ -66,6 +66,7 @@ typedef struct FileData {
 
 void fatal_win32(const wchar_t *context);
 void fatal_message(const wchar_t *message);
+void launcher_warning_fmt(const wchar_t *title, const wchar_t *format, ...);
 
 Arena arena_create(u64 reserve_size, u64 initial_commit_size);
 void arena_destroy(Arena *arena);

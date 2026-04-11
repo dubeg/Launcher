@@ -39,7 +39,7 @@ The smoke test starts the launcher, waits for the window, sends `Alt+Space`, typ
 
 ## Config
 
-- Extra application directories: `config/locations.json`
+- Extra application directories: `config/locations.json` — each entry in `paths` is either a string (`"D:\\Apps"`) or an object `{ "path": "...", "recursive": false }`. Plain strings and `"recursive": false` only list `.exe`/`.msc`/`.cpl`/`.com`/`.bat`/`.cmd` in that folder; `"recursive": true` walks subfolders (skips junctions/symlink dirs), capped at 40k items per root.
 - Friendly `System32` aliases: `data/system_aliases.json`
 
 ## Notes
