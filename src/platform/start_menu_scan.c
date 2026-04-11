@@ -254,12 +254,69 @@ scan_known_folder(Arena *arena, TempItemList *list, const GUID *folder_id, const
     }
 }
 
+static bool
+wide_args_equal(const wchar_t *a, const wchar_t *b)
+{
+    if (!a || !a[0]) {
+        return !b || !b[0];
+    }
+    if (!b || !b[0]) {
+        return false;
+    }
+    return _wcsicmp(a, b) == 0;
+}
+
+static bool
+launch_item_same_target(const LaunchItem *a, const LaunchItem *b)
+{
+    if (!a->launch_path || !b->launch_path) {
+        return false;
+    }
+    if (_wcsicmp(a->launch_path, b->launch_path) != 0) {
+        return false;
+    }
+    return wide_args_equal(a->arguments, b->arguments);
+}
+
+/* Prior items in `items[0..prior_count)` were already kept; drop duplicates of them. */
+static bool
+start_menu_duplicate_of_prior(const LaunchItem *items, u32 prior_count, const LaunchItem *candidate)
+{
+    for (u32 i = 0; i < prior_count; ++i) {
+        if (launch_item_same_target(&items[i], candidate)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Scan order: per-user Programs (AppData) before common Programs (ProgramData), so when
+ * two shortcuts (or direct entries) share the same launch_path + arguments, the first wins.
+ */
+static void
+start_menu_dedupe_by_target(TempItemList *list)
+{
+    u32 w = 0;
+    for (u32 r = 0; r < list->count; ++r) {
+        if (start_menu_duplicate_of_prior(list->items, w, &list->items[r])) {
+            continue;
+        }
+        if (w != r) {
+            list->items[w] = list->items[r];
+        }
+        w++;
+    }
+    list->count = w;
+}
+
 bool
 start_menu_scan_build(Arena *arena, const CatalogAliases *aliases, LaunchItemArray *out_items)
 {
     TempItemList temp = {0};
     scan_known_folder(arena, &temp, &FOLDERID_Programs, aliases);
     scan_known_folder(arena, &temp, &FOLDERID_CommonPrograms, aliases);
+    start_menu_dedupe_by_target(&temp);
 
     out_items->count = temp.count;
     out_items->items = (LaunchItem *)arena_push(arena, sizeof(LaunchItem) * temp.count, sizeof(void *));
