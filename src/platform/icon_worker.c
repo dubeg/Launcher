@@ -2,7 +2,10 @@
 
 #include <shobjidl.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <math.h>
+
+#pragma comment(lib, "shlwapi.lib")
 
 static bool
 resample_rgba_area_premul(const u8 *src, s32 src_w, s32 src_h, u8 *dst, s32 dst_w, s32 dst_h)
@@ -170,54 +173,18 @@ extract_shell_item_image_rgba(const wchar_t *path, s32 source_size, u8 **out_pix
 }
 
 static bool
-extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_width, s32 *out_height, s32 *out_stride)
+path_is_lnk_file(const wchar_t *path)
 {
-    if (!path || !path[0] || !out_pixels || !out_width || !out_height || !out_stride || icon_size <= 0) {
+    const wchar_t *ext = PathFindExtensionW(path);
+    return ext && ext[0] && _wcsicmp(ext, L".lnk") == 0;
+}
+
+static bool
+render_hicon_to_square_rgba(HICON hIcon, s32 source_size, s32 icon_size, u8 **out_pixels, s32 *out_width, s32 *out_height,
+                            s32 *out_stride)
+{
+    if (!hIcon || source_size <= 0 || icon_size <= 0 || !out_pixels || !out_width || !out_height || !out_stride) {
         return false;
-    }
-
-    SHFILEINFOW info;
-    ZeroMemory(&info, sizeof(info));
-    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
-    if (icon_index >= 0) {
-        flags |= SHGFI_SYSICONINDEX;
-    }
-    if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
-        ZeroMemory(&info, sizeof(info));
-        flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES;
-        if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
-            return false;
-        }
-    }
-    if (!info.hIcon) {
-        return false;
-    }
-
-    s32 source_size = icon_size * 3;
-    if (source_size < 48) {
-        source_size = 48;
-    }
-    if (source_size > 128) {
-        source_size = 128;
-    }
-
-    u8 *native_rgba = NULL;
-    s32 native_w = 0;
-    s32 native_h = 0;
-    s32 native_stride = 0;
-    if (extract_shell_item_image_rgba(path, source_size, &native_rgba, &native_w, &native_h, &native_stride)) {
-        u8 *pixels = (u8 *)heap_alloc_zero((size_t)icon_size * (size_t)icon_size * 4u);
-        if (pixels) {
-            resample_rgba_area_premul(native_rgba, native_w, native_h, pixels, icon_size, icon_size);
-            *out_pixels = pixels;
-            *out_width = icon_size;
-            *out_height = icon_size;
-            *out_stride = icon_size * 4;
-            heap_free(native_rgba);
-            DestroyIcon(info.hIcon);
-            return true;
-        }
-        heap_free(native_rgba);
     }
 
     BITMAPINFO bmi;
@@ -231,20 +198,18 @@ extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 *
 
     HDC hdc = CreateCompatibleDC(NULL);
     if (!hdc) {
-        DestroyIcon(info.hIcon);
         return false;
     }
     void *dib_pixels = NULL;
     HBITMAP dib = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &dib_pixels, NULL, 0);
     if (!dib || !dib_pixels) {
         DeleteDC(hdc);
-        DestroyIcon(info.hIcon);
         return false;
     }
 
     HGDIOBJ old_obj = SelectObject(hdc, dib);
     PatBlt(hdc, 0, 0, source_size, source_size, BLACKNESS);
-    DrawIconEx(hdc, 0, 0, info.hIcon, source_size, source_size, 0, NULL, DI_NORMAL);
+    DrawIconEx(hdc, 0, 0, hIcon, source_size, source_size, 0, NULL, DI_NORMAL);
 
     s32 src_stride = source_size * 4;
     u8 *src_rgba = (u8 *)heap_alloc_zero((size_t)src_stride * (size_t)source_size);
@@ -275,8 +240,95 @@ extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 *
     SelectObject(hdc, old_obj);
     DeleteObject(dib);
     DeleteDC(hdc);
-    DestroyIcon(info.hIcon);
     return (*out_pixels != NULL);
+}
+
+static bool
+extract_shell_icon_rgba(const wchar_t *path, s32 icon_index, s32 icon_size, u8 **out_pixels, s32 *out_width, s32 *out_height,
+                        s32 *out_stride)
+{
+    if (!path || !path[0] || !out_pixels || !out_width || !out_height || !out_stride || icon_size <= 0) {
+        return false;
+    }
+
+    s32 source_size = icon_size * 3;
+    if (source_size < 48) {
+        source_size = 48;
+    }
+    if (source_size > 128) {
+        source_size = 128;
+    }
+
+    /* Explorer resolves .lnk icons through shell handlers (CPL, etc.), not the raw target file type. */
+    if (path_is_lnk_file(path)) {
+        u8 *native_rgba = NULL;
+        s32 native_w = 0;
+        s32 native_h = 0;
+        s32 native_stride = 0;
+        if (extract_shell_item_image_rgba(path, source_size, &native_rgba, &native_w, &native_h, &native_stride)) {
+            u8 *pixels = (u8 *)heap_alloc_zero((size_t)icon_size * (size_t)icon_size * 4u);
+            if (pixels && resample_rgba_area_premul(native_rgba, native_w, native_h, pixels, icon_size, icon_size)) {
+                *out_pixels = pixels;
+                *out_width = icon_size;
+                *out_height = icon_size;
+                *out_stride = icon_size * 4;
+                heap_free(native_rgba);
+                return true;
+            }
+            heap_free(pixels);
+            heap_free(native_rgba);
+        }
+    }
+
+    /* Explicit icon index from .lnk (resource id or ordinal): SHGetFileInfo ignores it; use ExtractIconEx. */
+    if (!path_is_lnk_file(path) && icon_index != -1) {
+        HICON hi = NULL;
+        UINT n = ExtractIconExW(path, icon_index, &hi, NULL, 1);
+        if (n > 0 && hi) {
+            bool ok = render_hicon_to_square_rgba(hi, source_size, icon_size, out_pixels, out_width, out_height, out_stride);
+            DestroyIcon(hi);
+            if (ok) {
+                return true;
+            }
+        }
+    }
+
+    SHFILEINFOW info;
+    ZeroMemory(&info, sizeof(info));
+    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
+    if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
+        ZeroMemory(&info, sizeof(info));
+        flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES;
+        if (!SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
+            return false;
+        }
+    }
+    if (!info.hIcon) {
+        return false;
+    }
+
+    u8 *native_rgba = NULL;
+    s32 native_w = 0;
+    s32 native_h = 0;
+    s32 native_stride = 0;
+    if (extract_shell_item_image_rgba(path, source_size, &native_rgba, &native_w, &native_h, &native_stride)) {
+        u8 *pixels = (u8 *)heap_alloc_zero((size_t)icon_size * (size_t)icon_size * 4u);
+        if (pixels && resample_rgba_area_premul(native_rgba, native_w, native_h, pixels, icon_size, icon_size)) {
+            *out_pixels = pixels;
+            *out_width = icon_size;
+            *out_height = icon_size;
+            *out_stride = icon_size * 4;
+            heap_free(native_rgba);
+            DestroyIcon(info.hIcon);
+            return true;
+        }
+        heap_free(pixels);
+        heap_free(native_rgba);
+    }
+
+    bool ok = render_hicon_to_square_rgba(info.hIcon, source_size, icon_size, out_pixels, out_width, out_height, out_stride);
+    DestroyIcon(info.hIcon);
+    return ok;
 }
 
 static DWORD WINAPI

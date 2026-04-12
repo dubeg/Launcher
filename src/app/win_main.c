@@ -1631,16 +1631,30 @@ app_get_or_create_icon_entry(AppState *app, const wchar_t *path, s32 icon_index)
 }
 
 static void
+app_item_resolved_icon_source(const LaunchItem *item, const wchar_t **out_path, s32 *out_index)
+{
+    /* Start menu .lnk: resolve icon like Explorer (IShellItem on the shortcut), not the raw target type. */
+    if (item->source == LaunchSource_StartMenuShortcut && item->shortcut_path && item->shortcut_path[0]) {
+        *out_path = item->shortcut_path;
+        *out_index = -1;
+        return;
+    }
+    *out_path = item->icon_path ? item->icon_path : item->launch_path;
+    *out_index = item->icon_index;
+}
+
+static void
 app_request_item_icon(AppState *app, const LaunchItem *item)
 {
     if (!app || !item) {
         return;
     }
-    const wchar_t *path = item->icon_path ? item->icon_path : item->launch_path;
+    const wchar_t *path = NULL;
+    s32 icon_index = -1;
+    app_item_resolved_icon_source(item, &path, &icon_index);
     if (!path || !path[0]) {
         return;
     }
-    s32 icon_index = item->icon_index;
     s32 idx = app_get_or_create_icon_entry(app, path, icon_index);
     if (idx < 0) {
         return;
@@ -1658,7 +1672,10 @@ app_request_item_icon(AppState *app, const LaunchItem *item)
             request.icon_size = 8;
         }
         wcsncpy_s(request.path, array_count(request.path), entry->path, _TRUNCATE);
-        if (item->icon_fallback_path && item->icon_fallback_path[0]) {
+        if (item->icon_path && item->icon_path[0]) {
+            wcsncpy_s(request.path_fallback, array_count(request.path_fallback), item->icon_path, _TRUNCATE);
+            request.icon_index_fallback = item->icon_index;
+        } else if (item->icon_fallback_path && item->icon_fallback_path[0]) {
             wcsncpy_s(request.path_fallback, array_count(request.path_fallback), item->icon_fallback_path, _TRUNCATE);
             request.icon_index_fallback = item->icon_fallback_index;
         } else {
@@ -2048,8 +2065,10 @@ app_render(AppState *app)
 
         const LaunchItem *item = app->results.items[(u32)i].item;
         app_request_item_icon(app, item);
-        const wchar_t *icon_path = item->icon_path ? item->icon_path : item->launch_path;
-        s32 icon_entry_idx = app_find_icon_entry(app, icon_path, item->icon_index);
+        const wchar_t *icon_lookup_path = NULL;
+        s32 icon_lookup_index = -1;
+        app_item_resolved_icon_source(item, &icon_lookup_path, &icon_lookup_index);
+        s32 icon_entry_idx = app_find_icon_entry(app, icon_lookup_path, icon_lookup_index);
         f32 icon_x = row_x + 6.0f * s;
         f32 icon_y = row_top + (row_height - icon_size) * 0.5f;
         if (icon_entry_idx >= 0 && app->icon_cache[icon_entry_idx].state == AppIconState_Ready && app->icon_cache[icon_entry_idx].texture.srv) {
