@@ -169,7 +169,7 @@ static void
 append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
 {
     wchar_t target[MAX_PATH * 4] = {0};
-    wchar_t arguments[512] = {0};
+    wchar_t arguments[MAX_PATH * 4] = {0};
     wchar_t link_icon_location[MAX_PATH * 4] = {0};
     int link_icon_index = 0;
     if (!resolve_shortcut(shortcut_path, target, array_count(target), arguments, array_count(arguments), link_icon_location,
@@ -209,7 +209,17 @@ append_shortcut(Arena *arena, TempItemList *list, const wchar_t *shortcut_path)
     item.source = LaunchSource_StartMenuShortcut;
     item.display_name = display_final;
     item.search_text = arena_strdup(arena, combined);
-    item.subtitle = arena_strdup(arena, target_utf8);
+    if (arguments[0]) {
+        char *args_utf8 = utf8_from_wide(arena, arguments);
+        size_t tlen = strlen(target_utf8);
+        size_t alen = strlen(args_utf8);
+        size_t subtitle_bytes = tlen + 1 + alen + 1;
+        char *subtitle = (char *)arena_push_zero(arena, subtitle_bytes, 1);
+        _snprintf_s(subtitle, subtitle_bytes, _TRUNCATE, "%s %s", target_utf8, args_utf8);
+        item.subtitle = subtitle;
+    } else {
+        item.subtitle = arena_strdup(arena, target_utf8);
+    }
     item.launch_path = arena_wcsdup(arena, target);
     item.shortcut_path = arena_wcsdup(arena, shortcut_path);
     item.arguments = arguments[0] ? arena_wcsdup(arena, arguments) : NULL;
