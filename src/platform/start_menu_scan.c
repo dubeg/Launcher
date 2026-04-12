@@ -31,6 +31,21 @@ strip_dots_lnk_suffix_utf8(char *s)
 }
 
 static void
+wide_expand_env_best_effort(wchar_t *buf, size_t buf_count)
+{
+    if (!buf || buf_count < 2 || buf[0] == L'\0') {
+        return;
+    }
+    enum { k_scratch_chars = MAX_PATH * 4 };
+    wchar_t scratch[k_scratch_chars];
+    DWORD n = ExpandEnvironmentStringsW(buf, scratch, k_scratch_chars);
+    if (n == 0 || n > k_scratch_chars) {
+        return;
+    }
+    wcsncpy_s(buf, buf_count, scratch, _TRUNCATE);
+}
+
+static void
 push_temp_item(TempItemList *list, const LaunchItem *item)
 {
     if (list->count >= list->capacity) {
@@ -65,11 +80,14 @@ resolve_shortcut(const wchar_t *shortcut_path, wchar_t *target, size_t target_co
     }
     if (SUCCEEDED(IPersistFile_Load(persist, shortcut_path, STGM_READ)) &&
         SUCCEEDED(IShellLinkW_GetPath(shell_link, target, (int)target_count, NULL, SLGP_RAWPATH))) {
+        wide_expand_env_best_effort(target, target_count);
         IShellLinkW_GetArguments(shell_link, args, (int)args_count);
+        wide_expand_env_best_effort(args, args_count);
         ok = target[0] != 0;
         if (ok && icon_location && icon_location_count > 0) {
             int idx = 0;
             if (SUCCEEDED(IShellLinkW_GetIconLocation(shell_link, icon_location, (int)icon_location_count, &idx))) {
+                wide_expand_env_best_effort(icon_location, icon_location_count);
                 if (icon_index_out) {
                     *icon_index_out = idx;
                 }

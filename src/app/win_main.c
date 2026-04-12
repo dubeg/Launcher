@@ -924,7 +924,7 @@ app_ctx_item_enabled(const LaunchItem *item, CtxAction action)
 }
 
 static void
-app_ctx_run_action(AppState *app, CtxAction action)
+app_ctx_run_action(AppState *app, CtxAction action, bool elevated_launch)
 {
     if (!app->ctx_open || app->ctx_target_index < 0 || (u32)app->ctx_target_index >= app->results.count) {
         return;
@@ -935,7 +935,7 @@ app_ctx_run_action(AppState *app, CtxAction action)
     }
     switch (action) {
     case CtxAction_Launch:
-        (void)platform_launch_item(item);
+        (void)platform_launch_item(item, elevated_launch);
         break;
     case CtxAction_CopyPath: {
         char *utf8 = utf8_from_wide(&app->frame_arena, item->launch_path);
@@ -951,7 +951,7 @@ app_ctx_run_action(AppState *app, CtxAction action)
 }
 
 static void
-app_ctx_activate_selection(AppState *app)
+app_ctx_activate_selection(AppState *app, bool elevated_launch)
 {
     CtxMenuPick picks[3];
     s32 n = app_ctx_rebuild_picks(app, picks);
@@ -959,7 +959,7 @@ app_ctx_activate_selection(AppState *app)
     if (n <= 0) {
         return;
     }
-    app_ctx_run_action(app, (CtxAction)picks[app->ctx_selected].action);
+    app_ctx_run_action(app, (CtxAction)picks[app->ctx_selected].action, elevated_launch);
 }
 
 static void
@@ -992,7 +992,7 @@ app_ctx_menu_keydown(AppState *app, HWND hwnd, WPARAM wParam, bool ctrl_down, bo
         changed = true;
         break;
     case VK_RETURN:
-        app_ctx_activate_selection(app);
+        app_ctx_activate_selection(app, ctrl_down && shift_down);
         changed = true;
         break;
     case VK_UP:
@@ -1520,13 +1520,13 @@ app_page_up(AppState *app)
 }
 
 static void
-app_activate_selection(AppState *app)
+app_activate_selection(AppState *app, bool elevated)
 {
     if (app->selected_index < 0 || (u32)app->selected_index >= app->results.count) {
         return;
     }
     const LaunchItem *item = app->results.items[app->selected_index].item;
-    if (platform_launch_item(item)) {
+    if (platform_launch_item(item, elevated)) {
         app_hide(app);
     }
 }
@@ -2410,7 +2410,7 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             case VK_END:
                 app_query_set_caret(app, app->query_length, shift_down);
                 break;
-            case VK_RETURN: app_activate_selection(app); break;
+            case VK_RETURN: app_activate_selection(app, ctrl_down && shift_down); break;
             case VK_F5: app_init_catalog(app); app_refresh_results(app); break;
             case VK_F6: {
                 bool snap_on = dx11_renderer_toggle_text_pixel_snap(&app->renderer);
@@ -2550,7 +2550,7 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
                 if (chit >= 0) {
                     app->ctx_selected = chit;
-                    app_ctx_activate_selection(app);
+                    app_ctx_activate_selection(app, false);
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
@@ -2568,7 +2568,7 @@ launcher_window_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (hit >= 0) {
                 app->selected_index = hit;
                 InvalidateRect(hwnd, NULL, FALSE);
-                app_activate_selection(app);
+                app_activate_selection(app, false);
             }
         }
         return 0;

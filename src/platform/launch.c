@@ -40,7 +40,7 @@ launch_path_extension_iequals(const wchar_t *path, const wchar_t *ext_with_dot)
 }
 
 bool
-platform_launch_item(const LaunchItem *item)
+platform_launch_item(const LaunchItem *item, bool elevated)
 {
     if (item->mode == SearchMode_Files && item->source == LaunchSource_Everything
         && path_is_directory_wide(item->launch_path)) {
@@ -63,7 +63,7 @@ platform_launch_item(const LaunchItem *item)
         info.cbSize = sizeof(info);
         info.fMask = SEE_MASK_NOASYNC;
         info.nShow = SW_SHOWNORMAL;
-        info.lpVerb = L"open";
+        info.lpVerb = elevated ? L"runas" : L"open";
         info.lpFile = explorer_path;
         info.lpParameters = params;
         return ShellExecuteExW(&info) == TRUE;
@@ -86,7 +86,7 @@ platform_launch_item(const LaunchItem *item)
         info.cbSize = sizeof(info);
         info.fMask = SEE_MASK_NOASYNC;
         info.nShow = SW_SHOWNORMAL;
-        info.lpVerb = NULL;
+        info.lpVerb = elevated ? L"runas" : NULL;
         info.lpFile = control_exe;
         info.lpParameters = params;
         info.lpDirectory = system_dir;
@@ -98,7 +98,7 @@ platform_launch_item(const LaunchItem *item)
     info.cbSize = sizeof(info);
     info.fMask = SEE_MASK_NOASYNC;
     info.nShow = SW_SHOWNORMAL;
-    info.lpVerb = L"open";
+    info.lpVerb = elevated ? L"runas" : L"open";
     info.lpFile = item->launch_path;
     info.lpParameters = item->arguments;
     return ShellExecuteExW(&info) == TRUE;
